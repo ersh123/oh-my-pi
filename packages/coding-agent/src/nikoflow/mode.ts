@@ -357,7 +357,9 @@ export function advanceNikoflowHumanGate<TMessage>(
 	const gateMintedAt = state.gateMintedAt;
 	const phase = currentPhase(state);
 	const acceptedAfter =
-		phase === "grilling" ? grillingConvergenceMarkerAt(gateMintedAt, messages, options) : gateMintedAt;
+		phase === "grilling"
+			? grillingConvergenceMarkerAt(gateMintedAt, messages, options, state.autonomous ? null : state.grillingMode)
+			: gateMintedAt;
 	if (acceptedAfter === null) {
 		return state.autonomous && state.batchGateAcceptedAt !== null ? { ...state, batchGateAcceptedAt: null } : state;
 	}
@@ -380,6 +382,7 @@ function grillingConvergenceMarkerAt<TMessage>(
 	gateMintedAt: number,
 	messages: readonly TMessage[],
 	options: NikoflowHumanGateAdvanceOptions<TMessage>,
+	grillingMode: NikoflowState["grillingMode"],
 ): number | null {
 	if (!options.messageToolName || !options.messageToolResult) return null;
 	let convergedAt: number | null = null;
@@ -391,7 +394,9 @@ function grillingConvergenceMarkerAt<TMessage>(
 		}
 		const marker = normalizeNikoflowGrillingConvergence(options.messageToolResult(message));
 		if (!marker) continue;
-		convergedAt = marker.openQuestions.length === 0 ? (timestamp ?? null) : null;
+		const hasInterviewFloor =
+			grillingMode !== "interview" || marker.assumptions.length > 0 || marker.risks.length > 0;
+		convergedAt = marker.openQuestions.length === 0 && hasInterviewFloor ? (timestamp ?? null) : null;
 	}
 	return convergedAt;
 }
@@ -563,6 +568,12 @@ export function formatGateHoldMessage(state: NikoflowState): string {
 				].join("\n");
 			}
 			return `Nikoflow batch ${phase} gate is waiting for a clean independent advisor review. Do not self-approve.`;
+		}
+		if (phase === "grilling" && state.grillingMode === "interview") {
+			return [
+				`Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`,
+				"Deep interview requires at least one named assumption or risk in the convergence marker.",
+			].join(" ");
 		}
 		return `Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`;
 	}

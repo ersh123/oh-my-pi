@@ -40,6 +40,7 @@ describe("nikoflow command", () => {
 		expect(normalizeNikoflowCommandArgs(["--model", "gpt", "fix"])).toEqual({
 			depth: "standard",
 			autonomous: false,
+			grillingMode: null,
 			argv: ["--model", "gpt", "fix"],
 		});
 	});
@@ -48,11 +49,13 @@ describe("nikoflow command", () => {
 		expect(normalizeNikoflowCommandArgs(["tactical", "fix"])).toEqual({
 			depth: "tactical",
 			autonomous: false,
+			grillingMode: null,
 			argv: ["fix"],
 		});
 		expect(normalizeNikoflowCommandArgs(["--depth=deep", "-p", "audit"])).toEqual({
 			depth: "deep",
 			autonomous: false,
+			grillingMode: null,
 			argv: ["-p", "audit"],
 		});
 	});
@@ -61,7 +64,35 @@ describe("nikoflow command", () => {
 		expect(normalizeNikoflowCommandArgs(["--batch", "deep", "fix"])).toEqual({
 			depth: "deep",
 			autonomous: true,
+			grillingMode: null,
 			argv: ["fix"],
+		});
+	});
+
+	test("normalizes grilling mode flags while preserving pass-through ordering", () => {
+		expect(normalizeNikoflowCommandArgs(["--interview", "--model", "gpt", "fix"])).toEqual({
+			depth: "standard",
+			autonomous: false,
+			grillingMode: "interview",
+			argv: ["--nikoflow-grilling", "interview", "--model", "gpt", "fix"],
+		});
+		expect(normalizeNikoflowCommandArgs(["--brief", "deep", "fix"])).toEqual({
+			depth: "deep",
+			autonomous: false,
+			grillingMode: "brief",
+			argv: ["--nikoflow-grilling", "brief", "fix"],
+		});
+	});
+
+	test("rejects deep interview batch normalization", () => {
+		expect(normalizeNikoflowCommandArgs(["--interview", "--batch", "fix"])).toEqual({
+			error: "Deep interview requires an interactive human; drop --interview or --batch.",
+		});
+		expect(normalizeNikoflowCommandArgs(["--brief", "--batch", "fix"])).toEqual({
+			depth: "standard",
+			autonomous: true,
+			grillingMode: "brief",
+			argv: ["--nikoflow-grilling", "brief", "fix"],
 		});
 	});
 
@@ -69,11 +100,13 @@ describe("nikoflow command", () => {
 		expect(normalizeNikoflowCommandArgs(["--depth", "standard", "deep", "fix"])).toEqual({
 			depth: "standard",
 			autonomous: false,
+			grillingMode: null,
 			argv: ["deep", "fix"],
 		});
 		expect(normalizeNikoflowCommandArgs(["--depth=standard", "deep", "fix"])).toEqual({
 			depth: "standard",
 			autonomous: false,
+			grillingMode: null,
 			argv: ["deep", "fix"],
 		});
 	});
@@ -84,6 +117,7 @@ describe("nikoflow command", () => {
 		).toEqual({
 			depth: "standard",
 			autonomous: false,
+			grillingMode: null,
 			argv: ["--model", "cheap", "--plan", "strong-plan", "--nikoflow-qa", "strong-qa", "fix"],
 		});
 	});

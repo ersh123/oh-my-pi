@@ -3,7 +3,12 @@
  */
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../nikoflow/state";
+import {
+	NIKOFLOW_DEPTHS,
+	NIKOFLOW_GRILLING_MODES,
+	type NikoflowDepth,
+	type NikoflowGrillingMode,
+} from "../nikoflow/state";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -68,6 +73,8 @@ export interface Args {
 	nikoflowDepth?: NikoflowDepth;
 	/** Hidden launcher field used by `nikoflow --batch` and print-mode Nikoflow. */
 	nikoflowBatch?: boolean;
+	/** Hidden launcher field used by `nikoflow --interview` / `--brief`. */
+	nikoflowGrilling?: NikoflowGrillingMode;
 	/** Hidden launcher field used by the `nikoflow --qa` flag to set modelRoles.advisor. */
 	nikoflowQa?: string;
 	messages: string[];
@@ -259,6 +266,20 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 				result.nikoflowDepth = value as NikoflowDepth;
 			} else {
 				result.unrecognizedFlags.push(arg);
+			}
+		} else if (arg === "--nikoflow-grilling" && i + 1 < args.length) {
+			const value = args[++i];
+			if (NIKOFLOW_GRILLING_MODES.includes(value as NikoflowGrillingMode)) {
+				result.nikoflowGrilling = value as NikoflowGrillingMode;
+			} else {
+				result.unrecognizedFlags.push(arg);
+			}
+		} else if (arg.startsWith("--nikoflow-grilling=")) {
+			const value = arg.slice("--nikoflow-grilling=".length);
+			if (NIKOFLOW_GRILLING_MODES.includes(value as NikoflowGrillingMode)) {
+				result.nikoflowGrilling = value as NikoflowGrillingMode;
+			} else {
+				result.unrecognizedFlags.push("--nikoflow-grilling");
 			}
 		} else if (arg.startsWith("@")) {
 			let filePath = arg.slice(1);

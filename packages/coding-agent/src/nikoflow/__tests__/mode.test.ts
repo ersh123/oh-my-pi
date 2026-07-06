@@ -301,6 +301,52 @@ describe("nikoflow mode callback helpers", () => {
 		expect(await createNikoflowBeforeToolCall(() => execute)(tool("write"))).toBeUndefined();
 	});
 
+	test("interview grilling requires a named assumption or risk in the convergence marker", () => {
+		const grilling = mintGateRequest(createState("tactical", { grillingMode: "interview" }), "gate-1", 10);
+		const emptyMarker = advanceNikoflowHumanGate(
+			grilling,
+			[grillingConvergedMessage(12), { role: "user", timestamp: 13 }],
+			gateOptions,
+		);
+
+		expect(currentPhase(emptyMarker)).toBe("grilling");
+		expect(emptyMarker.gateRequestId).toBe("gate-1");
+		expect(formatGateHoldMessage(emptyMarker)).toContain(
+			"Deep interview requires at least one named assumption or risk",
+		);
+
+		const withAssumption = advanceNikoflowHumanGate(
+			grilling,
+			[grillingConvergedMessage(12, [], ["scope is bounded"]), { role: "user", timestamp: 13 }],
+			gateOptions,
+		);
+		expect(currentPhase(withAssumption)).toBe("execute");
+	});
+
+	test("brief and default grilling keep the current empty-assumptions convergence bar", () => {
+		const brief = mintGateRequest(createState("tactical", { grillingMode: "brief" }), "gate-1", 10);
+		const defaultMode = mintGateRequest(createState("tactical"), "gate-1", 10);
+
+		expect(
+			currentPhase(
+				advanceNikoflowHumanGate(
+					brief,
+					[grillingConvergedMessage(12), { role: "user", timestamp: 13 }],
+					gateOptions,
+				),
+			),
+		).toBe("execute");
+		expect(
+			currentPhase(
+				advanceNikoflowHumanGate(
+					defaultMode,
+					[grillingConvergedMessage(12), { role: "user", timestamp: 13 }],
+					gateOptions,
+				),
+			),
+		).toBe("execute");
+	});
+
 	test("batch grilling advances on clean advisor review, not primary text alone", () => {
 		const grilling = mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10);
 		const primaryTextOnly = advanceNikoflowHumanGate(
@@ -328,6 +374,18 @@ describe("nikoflow mode callback helpers", () => {
 		const next = advanceNikoflowAdvisorGate(ready, advisorReview("gate-1"));
 		expect(currentPhase(next)).toBe("execute");
 		expect(next.gateRequestId).toBeNull();
+	});
+
+	test("batch grilling ignores a stale interview grilling mode", () => {
+		const grilling = mintGateRequest(
+			createState("tactical", { autonomous: true, grillingMode: "interview" }),
+			"gate-1",
+			10,
+		);
+		const ready = advanceNikoflowHumanGate(grilling, [grillingConvergedMessage(12)], gateOptions);
+
+		expect(currentPhase(ready)).toBe("grilling");
+		expect(ready.batchGateAcceptedAt).toBe(12);
 	});
 
 	test("batch grilling blocks non-empty open questions even with a clean advisor review", () => {

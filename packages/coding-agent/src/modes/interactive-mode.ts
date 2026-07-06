@@ -79,12 +79,19 @@ import {
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
+import { assessContextThinness } from "../nikoflow/context-thinness";
 import {
 	type NikoflowRoleSelections,
+	promptNikoflowGrillingMode,
 	promptNikoflowModelRoles,
 	shouldPromptNikoflowModelRoles,
 } from "../nikoflow/role-picker";
-import { NIKOFLOW_DEPTHS, type NikoflowDepth, nikoflowStateFromModeData } from "../nikoflow/state";
+import {
+	NIKOFLOW_DEPTHS,
+	type NikoflowDepth,
+	type NikoflowGrillingMode,
+	nikoflowStateFromModeData,
+} from "../nikoflow/state";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -2085,6 +2092,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				persist: false,
 				sendContext: false,
 				initialState: restoredState,
+				grillingMode: restoredState.grillingMode,
 			});
 			return;
 		}
@@ -2777,16 +2785,34 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			const parts = text.split(/\s+/).filter(Boolean);
-			const autonomous = parts.includes("--batch");
-			const filtered = parts.filter(part => part !== "--batch");
+			let autonomous = false;
+			let grillingMode: NikoflowGrillingMode | null = null;
+			const filtered: string[] = [];
+			for (const part of parts) {
+				if (part === "--batch") {
+					autonomous = true;
+				} else if (part === "--interview") {
+					grillingMode = "interview";
+				} else if (part === "--brief") {
+					grillingMode = "brief";
+				} else {
+					filtered.push(part);
+				}
+			}
+			if (autonomous && grillingMode === "interview") {
+				throw new Error("Deep interview requires an interactive human; drop --interview or --batch.");
+			}
 			const [first = "", ...tail] = filtered;
 			const hasDepth = NIKOFLOW_DEPTHS.includes(first as NikoflowDepth);
 			const depth = hasDepth ? (first as NikoflowDepth) : "standard";
 			const promptText = hasDepth ? tail.join(" ").trim() : filtered.join(" ").trim();
 
 			await this.#promptNikoflowModelRoles(depth, autonomous);
+			const selectedGrillingMode =
+				autonomous || grillingMode ? null : await this.#promptNikoflowGrillingMode(promptText);
 			await this.session.activateNikoflowMode(depth, {
 				autonomous,
+				grillingMode: autonomous ? null : (grillingMode ?? selectedGrillingMode),
 				deferHumanGateMint: promptText.length > 0 && !autonomous,
 			});
 			this.showStatus(`Nikoflow enabled (${depth}${autonomous ? ", batch" : ""}).`);
@@ -2801,6 +2827,14 @@ export class InteractiveMode implements InteractiveModeContext {
 					: "";
 			this.showError(`${message}${shellHint}`);
 		}
+	}
+
+	async #promptNikoflowGrillingMode(task: string): Promise<NikoflowGrillingMode | null> {
+		if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
+		if (!assessContextThinness(this.sessionManager.getCwd(), task).thin) return null;
+		const mode = await promptNikoflowGrillingMode();
+		if (!mode) this.showStatus("Nikoflow grilling: default.");
+		return mode;
 	}
 
 	async #promptNikoflowModelRoles(depth: NikoflowDepth, autonomous: boolean): Promise<void> {

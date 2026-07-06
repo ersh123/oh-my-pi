@@ -89,6 +89,25 @@ describe("nikoflow state", () => {
 		expect(advancePhase(ready).batchGateAcceptedAt).toBeNull();
 	});
 
+	test("round-trips grilling mode through mode data", () => {
+		const state = createState("standard", { grillingMode: "interview" });
+		const restored = nikoflowStateFromModeData(nikoflowModeData(state));
+
+		expect(state.grillingMode).toBe("interview");
+		expect(restored?.grillingMode).toBe("interview");
+	});
+
+	test("restores missing or unknown grilling mode as null", () => {
+		expect(nikoflowStateFromModeData({ depth: "standard", phaseIndex: 0 })?.grillingMode).toBeNull();
+		expect(
+			nikoflowStateFromModeData({
+				depth: "standard",
+				phaseIndex: 0,
+				grillingMode: "marathon",
+			})?.grillingMode,
+		).toBeNull();
+	});
+
 	test("mutators return new objects", () => {
 		const initial = createState("tactical");
 		const minted = mintGateRequest(initial, "g1");

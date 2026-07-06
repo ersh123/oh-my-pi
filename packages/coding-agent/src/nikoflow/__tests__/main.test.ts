@@ -23,13 +23,31 @@ describe("nikoflow CLI activation guard", () => {
 		expect(normalizeNikoflowCommandArgs(["--batch", "deep", "ship it"])).toEqual({
 			depth: "deep",
 			autonomous: true,
+			grillingMode: null,
 			argv: ["ship it"],
 		});
 
-		const parsed = parseArgs(["--nikoflow-depth", "standard", "--nikoflow-batch", "ship it"]);
+		const parsed = parseArgs([
+			"--nikoflow-depth",
+			"standard",
+			"--nikoflow-batch",
+			"--nikoflow-grilling",
+			"brief",
+			"ship it",
+		]);
 		expect(parsed.nikoflowDepth).toBe("standard");
 		expect(parsed.nikoflowBatch).toBe(true);
+		expect(parsed.nikoflowGrilling).toBe("brief");
 		expect(parsed.messages).toEqual(["ship it"]);
+	});
+
+	test("rejects deep interview in batch mode", () => {
+		expect(() =>
+			rejectNikoflowInNonInteractiveMode("niko flow:standard do it", undefined, true, "interview"),
+		).toThrow("Deep interview requires an interactive human");
+		expect(() =>
+			rejectNikoflowInNonInteractiveMode("niko flow:standard do it", undefined, true, "brief"),
+		).not.toThrow();
 	});
 
 	test("parses first-token nikoflow keywords into command rest", () => {

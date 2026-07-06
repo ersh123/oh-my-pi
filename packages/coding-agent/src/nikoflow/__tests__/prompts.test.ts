@@ -21,6 +21,38 @@ describe("nikoflow prompts", () => {
 		expect(prompt).toContain("open_questions: []");
 	});
 
+	test("grilling prompt changes only for explicit interactive modes", () => {
+		const current = getPhasePrompt(createState("standard"));
+		const interview = getPhasePrompt(createState("standard", { grillingMode: "interview" }));
+		const brief = getPhasePrompt(createState("standard", { grillingMode: "brief" }));
+
+		expect(current).toContain("Grilling phase. Interrogate the user");
+		expect(interview).toContain("there is no existing project context");
+		expect(interview).toContain("pinned by an explicit answer");
+		expect(brief).toContain("fast scoping pass");
+		expect(brief).toContain("Ask only the few questions");
+		expect(interview).toContain("open_questions: []");
+		expect(brief).toContain("open_questions: []");
+		expect(current).not.toBe(interview);
+		expect(current).not.toBe(brief);
+	});
+
+	test("batch grilling prompt ignores grilling mode", () => {
+		const batch = getPhasePrompt(createState("standard", { autonomous: true }));
+		const interviewBatch = getPhasePrompt(createState("standard", { autonomous: true, grillingMode: "interview" }));
+		const briefBatch = getPhasePrompt(createState("standard", { autonomous: true, grillingMode: "brief" }));
+
+		expect(interviewBatch).toBe(batch);
+		expect(briefBatch).toBe(batch);
+	});
+
+	test("non-grilling phase prompts ignore grilling mode", () => {
+		const adr = getPhasePrompt(advancePhase(createState("standard")));
+		const interviewAdr = getPhasePrompt(advancePhase(createState("standard", { grillingMode: "interview" })));
+
+		expect(interviewAdr).toBe(adr);
+	});
+
 	test("switches protocol by phase", () => {
 		const execute = advancePhase(createState("tactical"));
 		expect(getCurrentPhaseProtocol(execute)).toContain("Execute phase");

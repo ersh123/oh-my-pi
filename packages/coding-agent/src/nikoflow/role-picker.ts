@@ -11,7 +11,7 @@ import {
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { HookSelectorComponent } from "../modes/components/hook-selector";
-import type { NikoflowRole } from "./state";
+import type { NikoflowGrillingMode, NikoflowRole } from "./state";
 
 const ROLE_PROMPTS: Record<NikoflowRole, string> = {
 	plan: "Architect — strong model that plans, grills, writes tickets (modelRoles.plan)",
@@ -49,6 +49,7 @@ export interface NikoflowRoleSelection {
 export type NikoflowRoleSelections = Partial<Record<NikoflowRole, NikoflowRoleSelection>>;
 
 export type NikoflowRolePicker = (request: NikoflowRolePickerRequest) => Promise<string | null>;
+export type NikoflowGrillingModePicker = () => Promise<NikoflowGrillingMode | null>;
 
 function roleFlagValue(args: Pick<Args, "model" | "plan" | "nikoflowQa">, role: NikoflowRole): string | undefined {
 	if (role === "plan") return args.plan;
@@ -223,6 +224,56 @@ export async function selectNikoflowModelRole(request: NikoflowRolePickerRequest
 			selectionMarker: "radio",
 			markableCount: request.options.length,
 			helpText: "up/down navigate  enter select  esc cancel",
+		},
+	);
+	ui.showOverlay(selector, {
+		anchor: "top-left",
+		width: "100%",
+		maxHeight: "100%",
+		margin: 0,
+		fullscreen: true,
+	});
+	ui.setFocus(selector);
+	ui.start();
+	return promise;
+}
+
+export async function promptNikoflowGrillingMode(): Promise<NikoflowGrillingMode | null> {
+	const { promise, resolve } = Promise.withResolvers<NikoflowGrillingMode | null>();
+	const ui = new TUI(new ProcessTerminal());
+	let done = false;
+	const options = [
+		{
+			label: "Deep interview",
+			description:
+				"Build the spec from nothing: exhaustive grilling; converges only with named assumptions and risks.",
+			mode: "interview" as const,
+		},
+		{
+			label: "Short brief",
+			description: "Few scoping questions, rest becomes explicit assumptions; start moving fast.",
+			mode: "brief" as const,
+		},
+	];
+	const finish = (value: NikoflowGrillingMode | null) => {
+		if (done) return;
+		done = true;
+		ui.stop();
+		resolve(value);
+	};
+	const selector = new HookSelectorComponent(
+		"Thin project context detected — how should Nikoflow scope this?",
+		options,
+		label => finish(options.find(option => option.label === label)?.mode ?? null),
+		() => finish(null),
+		{
+			tui: ui,
+			initialIndex: 1,
+			outline: true,
+			maxVisible: 8,
+			selectionMarker: "radio",
+			markableCount: options.length,
+			helpText: "up/down navigate  enter select  esc default grilling",
 		},
 	);
 	ui.showOverlay(selector, {

@@ -22,12 +22,15 @@ export default class Nikoflow extends Command {
 	static flags = {
 		depth: Flags.string({ description: "Nikoflow depth", options: [...NIKOFLOW_DEPTHS] }),
 		batch: Flags.boolean({ description: "Run Nikoflow gates autonomously through advisor review" }),
+		interview: Flags.boolean({ description: "Use deep interview grilling for thin project context" }),
+		brief: Flags.boolean({ description: "Use short brief grilling for thin project context" }),
 		exec: Flags.string({ description: "Executor model (maps to modelRoles.default)" }),
 		architect: Flags.string({ description: "Architect model (maps to modelRoles.plan)" }),
 		qa: Flags.string({ description: "QA model (maps to modelRoles.advisor)" }),
 	};
 	static examples = [
 		`${APP_NAME} nikoflow "fix this bug"`,
+		`${APP_NAME} nikoflow --brief "build this small feature"`,
 		`${APP_NAME} nikoflow:tactical "fix a typo"`,
 		`${APP_NAME} nikoflow deep --exec gpt-5.3-codex-spark --architect gpt-5.5 "design the change"`,
 	];

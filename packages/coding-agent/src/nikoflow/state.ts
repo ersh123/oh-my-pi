@@ -3,6 +3,9 @@ import { cloneTickets, type NikoflowTicket } from "./tickets";
 export const NIKOFLOW_DEPTHS = ["tactical", "standard", "deep"] as const;
 export type NikoflowDepth = (typeof NIKOFLOW_DEPTHS)[number];
 
+export const NIKOFLOW_GRILLING_MODES = ["interview", "brief"] as const;
+export type NikoflowGrillingMode = (typeof NIKOFLOW_GRILLING_MODES)[number];
+
 export type NikoflowPhase = "grilling" | "adr" | "prd" | "tickets" | "execute" | "verify";
 
 export const NIKOFLOW_PHASES: Record<NikoflowDepth, readonly NikoflowPhase[]> = {
@@ -25,6 +28,7 @@ export const PHASE_ROLE: Record<NikoflowPhase, NikoflowRole> = {
 export interface NikoflowState {
 	depth: NikoflowDepth;
 	autonomous: boolean;
+	grillingMode: NikoflowGrillingMode | null;
 	phaseIndex: number;
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
@@ -37,16 +41,27 @@ export interface NikoflowState {
 export interface NikoflowModeData {
 	depth: NikoflowDepth;
 	autonomous: boolean;
+	grillingMode: NikoflowGrillingMode | null;
 	phaseIndex: number;
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
 	batchGateAcceptedAt: number | null;
 }
 
-export function createState(depth: NikoflowDepth, options: { autonomous?: boolean } = {}): NikoflowState {
+function normalizeGrillingMode(value: unknown): NikoflowGrillingMode | null {
+	return typeof value === "string" && NIKOFLOW_GRILLING_MODES.includes(value as NikoflowGrillingMode)
+		? (value as NikoflowGrillingMode)
+		: null;
+}
+
+export function createState(
+	depth: NikoflowDepth,
+	options: { autonomous?: boolean; grillingMode?: NikoflowGrillingMode | null } = {},
+): NikoflowState {
 	return {
 		depth,
 		autonomous: options.autonomous === true,
+		grillingMode: normalizeGrillingMode(options.grillingMode),
 		phaseIndex: 0,
 		gateRequestId: null,
 		gateMintedAt: null,
@@ -61,6 +76,7 @@ export function nikoflowModeData(state: NikoflowState): NikoflowModeData {
 	return {
 		depth: state.depth,
 		autonomous: state.autonomous,
+		grillingMode: state.grillingMode,
 		phaseIndex: state.phaseIndex,
 		gateRequestId: state.gateRequestId,
 		gateMintedAt: state.gateMintedAt,
@@ -74,7 +90,10 @@ export function nikoflowStateFromModeData(
 	if (!modeData) return null;
 	const depth = modeData.depth;
 	if (typeof depth !== "string" || !NIKOFLOW_DEPTHS.includes(depth as NikoflowDepth)) return null;
-	const state = createState(depth as NikoflowDepth, { autonomous: modeData?.autonomous === true });
+	const state = createState(depth as NikoflowDepth, {
+		autonomous: modeData?.autonomous === true,
+		grillingMode: normalizeGrillingMode(modeData.grillingMode),
+	});
 	const phases = materializePhases(state.depth);
 	const phaseIndex = modeData.phaseIndex;
 	if (typeof phaseIndex !== "number" || !Number.isInteger(phaseIndex)) return state;

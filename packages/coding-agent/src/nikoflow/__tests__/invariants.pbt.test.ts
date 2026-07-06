@@ -49,9 +49,11 @@ function depth(random: () => number): NikoflowDepth {
 
 function stateWithGate(random: () => number, gateRequestId: string | null): NikoflowState {
 	const selectedDepth = depth(random);
+	const modeRoll = int(random, 3);
 	return {
 		depth: selectedDepth,
 		autonomous: false,
+		grillingMode: modeRoll === 0 ? null : modeRoll === 1 ? "interview" : "brief",
 		phaseIndex: int(random, materializePhases(selectedDepth).length + 5) - 2,
 		gateRequestId,
 		gateMintedAt: gateRequestId ? int(random, 1_000_000) : null,

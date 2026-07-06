@@ -908,6 +908,7 @@ export interface AgentSessionNikoflowActivationOptions {
 	sendContext?: boolean;
 	deferHumanGateMint?: boolean;
 	autonomous?: boolean;
+	grillingMode?: NikoflowState["grillingMode"];
 	initialState?: NikoflowState;
 }
 
@@ -7411,6 +7412,7 @@ export class AgentSession {
 				details: {
 					depth: state.depth,
 					autonomous: state.autonomous,
+					grillingMode: state.grillingMode,
 					phaseIndex: state.phaseIndex,
 					gateRequestId: state.gateRequestId,
 					gateMintedAt: state.gateMintedAt,
@@ -7439,9 +7441,17 @@ export class AgentSession {
 		this.#nikoflowAdvisorReviewAttempts.clear();
 		this.#nikoflowCallbacks?.uninstall();
 		this.#nikoflowCallbacks = undefined;
+		if (options.autonomous === true && options.grillingMode === "interview") {
+			throw new Error("Deep interview requires an interactive human; drop --interview or --batch.");
+		}
 		const state = options.initialState
-			? this.#withNikoflowTicketDagFromPersistedState(options.initialState)
-			: createState(depth, { autonomous: options.autonomous });
+			? this.#withNikoflowTicketDagFromPersistedState(
+					options.initialState.autonomous ? { ...options.initialState, grillingMode: null } : options.initialState,
+				)
+			: createState(depth, {
+					autonomous: options.autonomous,
+					grillingMode: options.autonomous ? null : options.grillingMode,
+				});
 		try {
 			this.#nikoflowCallbacks = await this.installNikoflowMode({
 				isGateSatisfied: current => current.gateRequestId === null,

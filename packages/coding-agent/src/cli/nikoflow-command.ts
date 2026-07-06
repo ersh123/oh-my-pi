@@ -1,6 +1,13 @@
-import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../nikoflow/state";
+import {
+	NIKOFLOW_DEPTHS,
+	NIKOFLOW_GRILLING_MODES,
+	type NikoflowDepth,
+	type NikoflowGrillingMode,
+} from "../nikoflow/state";
 
-export type ParsedNikoflowArgs = { depth: NikoflowDepth; autonomous: boolean; argv: string[] } | { error: string };
+export type ParsedNikoflowArgs =
+	| { depth: NikoflowDepth; autonomous: boolean; grillingMode: NikoflowGrillingMode | null; argv: string[] }
+	| { error: string };
 
 const ROLE_FLAGS: Record<string, string> = {
 	"--exec": "--model",
@@ -15,9 +22,21 @@ function parseDepth(value: string | undefined): NikoflowDepth | undefined {
 		: undefined;
 }
 
+function parseGrillingMode(value: string | undefined): NikoflowGrillingMode | undefined {
+	const normalized = value?.toLowerCase();
+	return normalized && NIKOFLOW_GRILLING_MODES.includes(normalized as NikoflowGrillingMode)
+		? (normalized as NikoflowGrillingMode)
+		: undefined;
+}
+
+function flagEnabled(arg: string, flag: string): boolean {
+	return arg === flag || arg === `${flag}=true`;
+}
+
 export function normalizeNikoflowCommandArgs(argv: string[]): ParsedNikoflowArgs {
 	let depth: NikoflowDepth = "standard";
 	let autonomous = false;
+	let grillingMode: NikoflowGrillingMode | null = null;
 	let sawPositional = false;
 	const rest: string[] = [];
 
@@ -61,9 +80,33 @@ export function normalizeNikoflowCommandArgs(argv: string[]): ParsedNikoflowArgs
 			autonomous = true;
 			continue;
 		}
+		if (flagEnabled(arg, "--interview") || flagEnabled(arg, "--brief")) {
+			grillingMode = flagEnabled(arg, "--interview") ? "interview" : "brief";
+			rest.push("--nikoflow-grilling", grillingMode);
+			continue;
+		}
+		if (arg === "--nikoflow-grilling") {
+			const parsed = parseGrillingMode(argv[index + 1]);
+			if (!parsed) return { error: `Invalid Nikoflow grilling mode: ${argv[index + 1] ?? ""}` };
+			grillingMode = parsed;
+			rest.push("--nikoflow-grilling", parsed);
+			index += 1;
+			continue;
+		}
+		if (arg.startsWith("--nikoflow-grilling=")) {
+			const parsed = parseGrillingMode(arg.slice("--nikoflow-grilling=".length));
+			if (!parsed) return { error: `Invalid Nikoflow grilling mode: ${arg.slice("--nikoflow-grilling=".length)}` };
+			grillingMode = parsed;
+			rest.push("--nikoflow-grilling", parsed);
+			continue;
+		}
 		sawPositional = true;
 		rest.push(arg);
 	}
 
-	return { depth, autonomous, argv: rest };
+	if (autonomous && grillingMode === "interview") {
+		return { error: "Deep interview requires an interactive human; drop --interview or --batch." };
+	}
+
+	return { depth, autonomous, grillingMode, argv: rest };
 }
