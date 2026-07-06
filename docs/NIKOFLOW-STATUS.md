@@ -38,6 +38,21 @@ blockers from earlier phases are superseded and correlated to the current gate i
 unreliable across 3 fixes. Replacing it with the native advisor (still independent + harness-
 owned) closed the crux. `reviewer.ts` was deleted.
 
+## Evidence integrity (hardened after a full code review)
+
+The gate mechanism was sound, but a review found the *evidence* the advisor judged was
+primary-forgeable; closed: the review diff is built from `git diff HEAD` + `git status
+--porcelain` (staged/committed/untracked all visible — can't be hidden by `git add`/commit);
+harvested test output is labeled unverified and the advisor confirms with its own read/grep
+tools; the gate passes only on an **explicit** advisor `verdict` (`approve`/`blocker`) — a
+severity-less note holds→escalates, never passes; advise calls carry the `gateId` so an
+unrelated monitor note can't satisfy a review; the read-only allowlist matches **builtins
+only** (an MCP tool sharing an allowlisted name is blocked); grilling convergence is a
+structured `nikoflow_grilling_converged` tool call (a quoted marker string can't converge);
+activation asserts the advisor role resolves. *Known residual (lower severity):* human gates
+advance on any user turn (no phase-regression keyword yet); ticket acceptance is primary-authored
+(mitigated by the tickets gate); attempt budget conflates infra failures with blocker cycles.
+
 ## Anti-self-approval invariants (property-tested, 36k assertions)
 
 - `gateMatches` fail-closed (a null/mismatched id never satisfies a gate).
