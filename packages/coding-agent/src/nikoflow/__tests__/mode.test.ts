@@ -86,7 +86,8 @@ function advisorReview(
 	severity: "nit" | "concern" | "blocker" = "nit",
 	note = "ok",
 ): NikoflowAdvisorReview {
-	return { gateId, reviewed: true, notes: [{ severity, note }] };
+	const verdict = severity === "blocker" ? "blocker" : "approve";
+	return { gateId, reviewed: true, verdict, notes: [{ severity, note, gateId, verdict }] };
 }
 
 const ticket = (id: string, blocked_by: string[] = [], status: NikoflowTicket["status"] = "todo"): NikoflowTicket => ({
@@ -1195,6 +1196,70 @@ describe("nikoflow mode callback helpers", () => {
 
 		expect(isComplete(state)).toBe(true);
 		expect(externalActions).toEqual([]);
+	});
+
+	test("severity-less advisor note without an explicit verdict does not pass the verify gate", async () => {
+		let state = markPhaseTurnStarted(mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1"));
+		const externalActions: string[] = [];
+		let reviewAttempts = 0;
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => state.gateRequestId === null,
+			() => undefined,
+			undefined,
+			undefined,
+			() => {
+				reviewAttempts++;
+				return { gateId: "gate-1", reviewed: true, notes: [{ gateId: "gate-1", note: "could not fully review" }] };
+			},
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(currentPhase(state)).toBe("verify");
+		expect(isComplete(state)).toBe(false);
+		expect(reviewAttempts).toBe(2);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
+	});
+
+	test("advisor note without the gate id does not satisfy the verify gate", async () => {
+		let state = markPhaseTurnStarted(mintGateRequest(advancePhase(advancePhase(createState("tactical"))), "gate-1"));
+		const externalActions: string[] = [];
+		const onBeforeYield = createNikoflowOnBeforeYield(
+			() => state,
+			() => state.gateRequestId === null,
+			() => undefined,
+			undefined,
+			undefined,
+			() => ({
+				gateId: "gate-1",
+				reviewed: true,
+				verdict: "approve",
+				notes: [{ severity: "nit", note: "clean but unrelated monitor aside", verdict: "approve" }],
+			}),
+			(current, review) => {
+				state = advanceNikoflowAdvisorGate(current, review);
+			},
+			undefined,
+			(_state, message) => {
+				externalActions.push(message);
+			},
+		);
+
+		await onBeforeYield();
+
+		expect(currentPhase(state)).toBe("verify");
+		expect(isComplete(state)).toBe(false);
+		expect(externalActions).toHaveLength(1);
+		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
 	});
 
 	test("primary text never satisfies the verify gate", async () => {

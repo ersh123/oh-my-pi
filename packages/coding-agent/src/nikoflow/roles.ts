@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import type { NikoflowPhase, NikoflowRole } from "./state";
 import { PHASE_ROLE } from "./state";
 
@@ -34,6 +35,14 @@ export function assertNikoflowRoleRails(resolve: RoleModelResolver): NikoflowRes
 	}
 	if (defaultRole && plan === defaultRole) {
 		throw new Error("Nikoflow requires modelRoles.plan to differ from modelRoles.default.");
+	}
+	if (!advisor) {
+		throw new Error("Nikoflow requires modelRoles.advisor to resolve to a configured model.");
+	}
+	if (defaultRole && advisor === defaultRole) {
+		logger.warn("Nikoflow modelRoles.advisor equals modelRoles.default; independence is context-level only.", {
+			advisor,
+		});
 	}
 
 	return { plan, default: defaultRole, advisor };

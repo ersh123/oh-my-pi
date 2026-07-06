@@ -42,15 +42,19 @@ export type NikoflowStateGateAdvance = (
 	state: NikoflowState,
 ) => Promise<unknown | null | undefined> | unknown | null | undefined;
 export type NikoflowAdvisorReviewSeverity = "nit" | "concern" | "blocker";
+export type NikoflowAdvisorReviewVerdict = "approve" | "blocker";
 
 export interface NikoflowAdvisorReviewNote {
 	note: string;
 	severity?: NikoflowAdvisorReviewSeverity;
+	gateId: string;
+	verdict?: NikoflowAdvisorReviewVerdict;
 }
 
 export interface NikoflowAdvisorReview {
 	gateId: string;
 	reviewed: true;
+	verdict: NikoflowAdvisorReviewVerdict;
 	notes: readonly NikoflowAdvisorReviewNote[];
 }
 
@@ -395,7 +399,7 @@ export function advanceNikoflowExecuteGate(
 function advanceNikoflowTicketAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
 	if (currentPhase(state) !== "execute") return state;
 	if (state.gateRequestId !== review.gateId) return state;
-	if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
+	if (!isNikoflowAdvisorReviewApproved(review)) return state;
 
 	const active = currentTicket(state);
 	if (!active) return state;
@@ -417,10 +421,21 @@ function advanceNikoflowTicketAdvisorGate(state: NikoflowState, review: Nikoflow
 
 function normalizeAdvisorReviewNote(value: unknown): NikoflowAdvisorReviewNote | null {
 	const rec = jsonRecordFromValue(value);
-	if (!rec || typeof rec.note !== "string" || rec.note.trim().length === 0) return null;
-	const note: NikoflowAdvisorReviewNote = { note: rec.note };
+	if (
+		!rec ||
+		typeof rec.note !== "string" ||
+		rec.note.trim().length === 0 ||
+		typeof rec.gateId !== "string" ||
+		rec.gateId.trim().length === 0
+	) {
+		return null;
+	}
+	const note: NikoflowAdvisorReviewNote = { note: rec.note, gateId: rec.gateId };
 	if (rec.severity === "nit" || rec.severity === "concern" || rec.severity === "blocker") {
 		note.severity = rec.severity;
+	}
+	if (rec.verdict === "approve" || rec.verdict === "blocker") {
+		note.verdict = rec.verdict;
 	}
 	return note;
 }
@@ -429,16 +444,27 @@ export function normalizeNikoflowAdvisorReview(value: unknown, state: NikoflowSt
 	const rec = jsonRecordFromValue(value);
 	if (rec?.reviewed !== true || typeof rec.gateId !== "string") return null;
 	if (state.gateRequestId !== rec.gateId) return null;
+	if (rec.verdict !== "approve" && rec.verdict !== "blocker") return null;
 	if (!Array.isArray(rec.notes)) return null;
 	const notes = rec.notes
 		.map(normalizeAdvisorReviewNote)
-		.filter((note): note is NikoflowAdvisorReviewNote => note !== null);
+		.filter((note): note is NikoflowAdvisorReviewNote => note !== null && note.gateId === rec.gateId);
 	if (notes.length === 0) return null;
-	return { gateId: rec.gateId, reviewed: true, notes };
+	const verdict = notes.some(note => note.severity === "blocker" || note.verdict === "blocker")
+		? "blocker"
+		: rec.verdict;
+	return { gateId: rec.gateId, reviewed: true, verdict, notes };
 }
 
 export function nikoflowAdvisorReviewBlockers(review: NikoflowAdvisorReview): string[] {
-	return review.notes.filter(note => note.severity === "blocker").map(note => note.note);
+	const blockers = review.notes
+		.filter(note => note.severity === "blocker" || note.verdict === "blocker")
+		.map(note => note.note);
+	return blockers.length > 0 || review.verdict !== "blocker" ? blockers : review.notes.map(note => note.note);
+}
+
+function isNikoflowAdvisorReviewApproved(review: NikoflowAdvisorReview): boolean {
+	return review.verdict === "approve" && nikoflowAdvisorReviewBlockers(review).length === 0;
 }
 
 export function advanceNikoflowAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
@@ -446,11 +472,11 @@ export function advanceNikoflowAdvisorGate(state: NikoflowState, review: Nikoflo
 	if (currentPhase(state) !== "verify") {
 		if (!isBatchHumanGateReadyForAdvisorReview(state)) return state;
 		if (state.gateRequestId !== review.gateId) return state;
-		if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
+		if (!isNikoflowAdvisorReviewApproved(review)) return state;
 		return advancePhase(state);
 	}
 	if (state.gateRequestId !== review.gateId) return state;
-	if (nikoflowAdvisorReviewBlockers(review).length > 0) return state;
+	if (!isNikoflowAdvisorReviewApproved(review)) return state;
 	return advancePhase(state);
 }
 

@@ -255,6 +255,7 @@ import {
 	type ToolChoiceGetter,
 } from "../nikoflow/mode";
 import { getCurrentPhaseProtocol } from "../nikoflow/prompts";
+import { collectNikoflowReviewDiff } from "../nikoflow/review-evidence";
 import { assertNikoflowRoleRails } from "../nikoflow/roles";
 import {
 	createState,
@@ -2486,7 +2487,9 @@ export class AgentSession {
 			} = descriptor;
 
 			const emissionGuard = new AdvisorEmissionGuard();
-			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
+			const adviseTool = new AdviseTool((note, severity, gateId, verdict) =>
+				this.#routeAdvice(advisorRef, note, severity, gateId, verdict),
+			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
@@ -2657,10 +2660,16 @@ export class AgentSession {
 	 * the per-advisor emission guard drops the note silently — the model still saw
 	 * `Recorded.`, so it isn't tempted to rephrase the same note past the dedupe.
 	 */
-	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
+	#routeAdvice(
+		advisor: ActiveAdvisor,
+		note: string,
+		severity?: AdvisorSeverity,
+		gateId?: string,
+		verdict?: AdvisorNote["verdict"],
+	): void {
 		const capture = this.#nikoflowAdvisorReviewCapture;
-		if (capture?.advisor === advisor) {
-			capture.notes.push({ note, severity, advisor: advisor.slug ? advisor.name : undefined });
+		if (capture?.advisor === advisor && gateId === capture.gateId) {
+			capture.notes.push({ note, severity, gateId, verdict, advisor: advisor.slug ? advisor.name : undefined });
 		}
 		if (!advisor.emissionGuard.accept(note)) {
 			logger.debug("advisor advice suppressed by emission guard", { severity, advisor: advisor.name });
@@ -2681,10 +2690,10 @@ export class AgentSession {
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
 		});
 		if (channel === "aside") {
-			this.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
+			this.yieldQueue.enqueue("advisor", { note, severity, gateId, verdict, advisor: source });
 			return;
 		}
-		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
+		const notes: AdvisorNote[] = [{ note, severity, gateId, verdict, advisor: source }];
 		const content = formatAdvisorBatchContent(notes);
 		const details = { notes } satisfies AdvisorMessageDetails;
 		if (channel === "preserve") {
@@ -7205,15 +7214,25 @@ export class AgentSession {
 			this.#nikoflowAdvisorReviewCapture = previousCapture;
 		}
 
-		if (notes.length === 0) {
+		const reviewNotes = notes.filter((note): note is AdvisorNote & { gateId: string } => note.gateId === gateId);
+		if (reviewNotes.length === 0) {
 			await this.#notifyNikoflowAdvisorReviewUnavailable(gateId, "advisor produced no review note");
 			return undefined;
 		}
-		return { gateId, reviewed: true, notes };
+		const hasBlocker = reviewNotes.some(note => note.severity === "blocker" || note.verdict === "blocker");
+		const hasApprove = reviewNotes.some(note => note.verdict === "approve");
+		const verdict = hasBlocker ? "blocker" : hasApprove ? "approve" : null;
+		if (!verdict) {
+			await this.#notifyNikoflowAdvisorReviewUnavailable(gateId, "advisor produced no explicit review verdict");
+			return undefined;
+		}
+		return { gateId, reviewed: true, verdict, notes: reviewNotes };
 	}
 
 	async #notifyNikoflowAdvisorBlock(review: NikoflowAdvisorReview): Promise<void> {
-		const blockers = review.notes.filter(note => note.severity === "blocker").map(note => note.note.trim());
+		const blockers = review.notes
+			.filter(note => note.severity === "blocker" || note.verdict === "blocker")
+			.map(note => note.note.trim());
 		const reason = blockers.length > 0 ? `\n${blockers.map(note => `- ${note}`).join("\n")}` : "";
 		await this.sendCustomMessage(
 			{
@@ -7344,18 +7363,7 @@ export class AgentSession {
 	}
 
 	async #nikoflowDiff(): Promise<string> {
-		const proc = Bun.spawn(["git", "diff", "--no-ext-diff", "--"], {
-			cwd: this.sessionManager.getCwd(),
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-		if (exitCode !== 0) return `git diff failed: ${stderr.trim() || `exit ${exitCode}`}`;
-		const diff = stdout.trim() || "(empty)";
+		const diff = await collectNikoflowReviewDiff(this.sessionManager.getCwd());
 		if (diff.length <= NIKOFLOW_ADVISOR_REVIEW_DIFF_LIMIT) return diff;
 		return `${diff.slice(0, NIKOFLOW_ADVISOR_REVIEW_DIFF_LIMIT)}\n\n[diff truncated for advisor review]`;
 	}

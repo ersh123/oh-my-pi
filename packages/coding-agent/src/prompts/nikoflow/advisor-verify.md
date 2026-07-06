@@ -1,4 +1,6 @@
-Nikoflow {{phase}} gate `{{gateId}}`: adversarially review the visible phase artifact, validation, and diff against the task and acceptance; call `advise` exactly once, using severity `blocker` for unmet acceptance, incoherent/incomplete artifacts, unresolved open questions, or red validation, otherwise severity `nit` with a clean-review summary.
+Nikoflow {{phase}} gate `{{gateId}}`: adversarially review the visible phase artifact, validation, and diff against the task and acceptance. Use your own read/grep/glob tools to confirm material claims before approving; do not trust primary-reported validation text.
+
+Call `advise` exactly once with `gateId: "{{gateId}}"` and an explicit `verdict`: use `verdict: "blocker"` and severity `blocker` for unmet acceptance, incoherent/incomplete artifacts, unresolved open questions, unconfirmed validation, or red validation; otherwise use `verdict: "approve"` and severity `nit` with a clean-review summary. Notes without this gate id or without an explicit verdict do not satisfy the gate.
 
 <task>
 {{task}}
@@ -12,7 +14,7 @@ Nikoflow {{phase}} gate `{{gateId}}`: adversarially review the visible phase art
 {{artifact}}
 </phase_artifact>
 
-<validation>
+<validation label="unverified primary-reported output">
 {{validation}}
 </validation>
 

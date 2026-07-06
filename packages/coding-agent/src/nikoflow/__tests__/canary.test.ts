@@ -17,7 +17,12 @@ describe("nikoflow gate canary", () => {
 		).toBeNull();
 
 		const blocker = normalizeNikoflowAdvisorReview(
-			{ gateId: "gate-current", reviewed: true, notes: [{ severity: "blocker", note: "tests still red" }] },
+			{
+				gateId: "gate-current",
+				reviewed: true,
+				verdict: "blocker",
+				notes: [{ gateId: "gate-current", severity: "blocker", verdict: "blocker", note: "tests still red" }],
+			},
 			state,
 		);
 		expect(blocker).not.toBeNull();
@@ -25,7 +30,12 @@ describe("nikoflow gate canary", () => {
 		expect(advanceNikoflowAdvisorGate(state, blocker!)).toBe(state);
 
 		const clean = normalizeNikoflowAdvisorReview(
-			{ gateId: "gate-current", reviewed: true, notes: [{ severity: "nit", note: "clean" }] },
+			{
+				gateId: "gate-current",
+				reviewed: true,
+				verdict: "approve",
+				notes: [{ gateId: "gate-current", severity: "nit", verdict: "approve", note: "clean" }],
+			},
 			state,
 		);
 		expect(clean).not.toBeNull();
