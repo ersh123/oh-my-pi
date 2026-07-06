@@ -56,6 +56,11 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import {
+	type NikoflowRolePicker,
+	promptNikoflowModelRoles,
+	shouldPromptNikoflowModelRoles,
+} from "./nikoflow/role-picker";
 import { inferDepthFromPrompt, type NikoflowDepth } from "./nikoflow/state";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
@@ -992,6 +997,7 @@ interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
 	selectSession?: typeof selectSession;
+	selectNikoflowModelRole?: NikoflowRolePicker;
 	runAcpMode?: RunAcpMode;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
@@ -1137,6 +1143,45 @@ export async function runRootCommand(
 		settingsInstance.get("theme.dark"),
 		settingsInstance.get("theme.light"),
 	);
+
+	if (
+		shouldPromptNikoflowModelRoles(parsedArgs, {
+			interactive: isInteractive,
+			stdinIsTTY: process.stdin.isTTY,
+			stdoutIsTTY: process.stdout.isTTY,
+		})
+	) {
+		pauseStartupWatchdog();
+		try {
+			const selections = await logger.time("promptNikoflowModelRoles", promptNikoflowModelRoles, {
+				args: parsedArgs,
+				settings: settingsInstance,
+				modelRegistry,
+				pick: deps.selectNikoflowModelRole,
+			});
+			const overrides: Record<string, string> = {};
+			if (selections.default) {
+				overrides.default = selections.default.selector;
+				parsedArgs.model = selections.default.selector;
+				parsedArgs.provider = undefined;
+			}
+			if (selections.plan) {
+				overrides.plan = selections.plan.selector;
+				parsedArgs.plan = selections.plan.selector;
+			}
+			if (selections.advisor) {
+				overrides.advisor = selections.advisor.selector;
+				parsedArgs.nikoflowQa = selections.advisor.selector;
+			}
+			settingsInstance.overrideModelRoles(overrides);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+			process.exit(2);
+		} finally {
+			resumeStartupWatchdog();
+		}
+	}
 
 	let scopedModels: ScopedModel[] = [];
 	const modelPatterns = parsedArgs.models ?? settingsInstance.get("enabledModels");

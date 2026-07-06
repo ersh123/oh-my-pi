@@ -31,13 +31,15 @@ export function assertNikoflowRoleRails(resolve: RoleModelResolver): NikoflowRes
 	const advisor = modelKey(resolve("advisor"));
 
 	if (!plan) {
-		throw new Error("Nikoflow requires modelRoles.plan to resolve to a configured model.");
+		throw new Error("Nikoflow requires modelRoles.plan to resolve. Pass --architect or configure modelRoles.plan.");
 	}
 	if (defaultRole && plan === defaultRole) {
-		throw new Error("Nikoflow requires modelRoles.plan to differ from modelRoles.default.");
+		throw new Error(
+			"Nikoflow requires modelRoles.plan to differ from modelRoles.default. Pass --architect/--exec or configure distinct roles.",
+		);
 	}
 	if (!advisor) {
-		throw new Error("Nikoflow requires modelRoles.advisor to resolve to a configured model.");
+		throw new Error("Nikoflow requires modelRoles.advisor to resolve. Pass --qa or configure modelRoles.advisor.");
 	}
 	if (defaultRole && advisor === defaultRole) {
 		logger.warn("Nikoflow modelRoles.advisor equals modelRoles.default; independence is context-level only.", {
