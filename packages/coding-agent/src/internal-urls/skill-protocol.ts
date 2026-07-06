@@ -11,7 +11,7 @@ import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { getActiveSkills } from "../extensibility/skills";
+import { getActiveSkills, isReservedNativeModeSkillName } from "../extensibility/skills";
 import { buildDirectoryResource } from "./filesystem-resource";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
@@ -43,7 +43,7 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const skills = context?.skills ?? getActiveSkills();
+		const skills = (context?.skills ?? getActiveSkills()).filter(skill => !isReservedNativeModeSkillName(skill.name));
 
 		const skillName = url.rawHost || url.hostname;
 		if (!skillName) {
@@ -104,9 +104,11 @@ export class SkillProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(): Promise<UrlCompletion[]> {
-		return getActiveSkills().map(skill => ({
-			value: skill.name,
-			...(skill.description ? { description: skill.description } : {}),
-		}));
+		return getActiveSkills()
+			.filter(skill => !isReservedNativeModeSkillName(skill.name))
+			.map(skill => ({
+				value: skill.name,
+				...(skill.description ? { description: skill.description } : {}),
+			}));
 	}
 }

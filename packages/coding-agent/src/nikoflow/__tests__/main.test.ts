@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseArgs } from "../../cli/args";
 import { normalizeNikoflowCommandArgs } from "../../cli/nikoflow-command";
 import { rejectNikoflowInNonInteractiveMode } from "../../main";
+import { parseNikoflowKeywordInput, tryHandleNikoflowKeywordInput } from "../../modes/controllers/input-controller";
 
 describe("nikoflow CLI activation guard", () => {
 	test("rejects nikoflow in print or non-interactive mode", () => {
@@ -29,5 +30,50 @@ describe("nikoflow CLI activation guard", () => {
 		expect(parsed.nikoflowDepth).toBe("standard");
 		expect(parsed.nikoflowBatch).toBe(true);
 		expect(parsed.messages).toEqual(["ship it"]);
+	});
+
+	test("parses first-token nikoflow keywords into command rest", () => {
+		expect(parseNikoflowKeywordInput("nikoflow:deep build Y")).toEqual({ rest: "deep build Y" });
+		expect(parseNikoflowKeywordInput("никофлоу:standard --batch Z")).toEqual({
+			rest: "standard --batch Z",
+		});
+		expect(parseNikoflowKeywordInput("nikoflow:wrong build Y")).toEqual({
+			error: "Invalid Nikoflow depth: wrong. Use tactical, standard, or deep.",
+		});
+		expect(parseNikoflowKeywordInput("please run nikoflow")).toBeUndefined();
+	});
+
+	test("consumes nikoflow keyword submissions before normal prompting", async () => {
+		const activations: string[] = [];
+		const handled = await tryHandleNikoflowKeywordInput(
+			"никофлоу разработай X",
+			{
+				handleNikoflowCommand: async rest => {
+					activations.push(rest ?? "");
+				},
+				showWarning: () => {
+					throw new Error("unexpected warning");
+				},
+			},
+			{ hasImages: false },
+		);
+
+		expect(handled).toBe(true);
+		expect(activations).toEqual(["разработай X"]);
+
+		const normalHandled = await tryHandleNikoflowKeywordInput(
+			"обычный запрос nikoflow",
+			{
+				handleNikoflowCommand: async rest => {
+					activations.push(rest ?? "");
+				},
+				showWarning: () => {
+					throw new Error("unexpected warning");
+				},
+			},
+			{ hasImages: false },
+		);
+		expect(normalHandled).toBe(false);
+		expect(activations).toEqual(["разработай X"]);
 	});
 });

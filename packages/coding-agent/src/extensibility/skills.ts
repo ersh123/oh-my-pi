@@ -43,6 +43,10 @@ export interface LoadSkillsResult {
 
 let activeSkills: readonly Skill[] = [];
 
+export function isReservedNativeModeSkillName(name: string): boolean {
+	return name.toLowerCase() === "nikoflow";
+}
+
 /**
  * Process-global snapshot of skills the active session loaded.
  * Read by internal URL protocol handlers (skill://).
@@ -98,15 +102,17 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 	);
 
 	return {
-		skills: result.items.map(capSkill => ({
-			name: capSkill.name,
-			description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
-			filePath: capSkill.path,
-			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-			source: options.source,
-			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-			_source: capSkill._source,
-		})),
+		skills: result.items
+			.filter(capSkill => !isReservedNativeModeSkillName(capSkill.name))
+			.map(capSkill => ({
+				name: capSkill.name,
+				description: typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
+				filePath: capSkill.path,
+				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
+				source: options.source,
+				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				_source: capSkill._source,
+			})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
 	};
 }
@@ -192,6 +198,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	);
 	// Filter skills by source and patterns first
 	const filteredSkills = result.items.filter(capSkill => {
+		if (isReservedNativeModeSkillName(capSkill.name)) return false;
 		if (disabledSkillNames.has(capSkill.name)) return false;
 		if (!isSourceEnabled(capSkill._source)) return false;
 		if (matchesIgnorePatterns(capSkill.name)) return false;
@@ -262,6 +269,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const allCustomSkills: Array<{ skill: Skill; path: string }> = [];
 	for (const { expandedDir, scanResult } of customDirectoryResults) {
 		for (const capSkill of scanResult.items) {
+			if (isReservedNativeModeSkillName(capSkill.name)) continue;
 			if (disabledSkillNames.has(capSkill.name)) continue;
 			if (matchesIgnorePatterns(capSkill.name)) continue;
 			if (!matchesIncludePatterns(capSkill.name)) continue;
@@ -320,6 +328,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		capSkill =>
 			capSkill._source.provider === MANAGED_SKILLS_PROVIDER_ID &&
 			isValidManagedSkillName(capSkill.name) &&
+			!isReservedNativeModeSkillName(capSkill.name) &&
 			!disabledSkillNames.has(capSkill.name) &&
 			!matchesIgnorePatterns(capSkill.name) &&
 			matchesIncludePatterns(capSkill.name),

@@ -79,6 +79,11 @@ import {
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
+import {
+	type NikoflowRoleSelections,
+	promptNikoflowModelRoles,
+	shouldPromptNikoflowModelRoles,
+} from "../nikoflow/role-picker";
 import { NIKOFLOW_DEPTHS, type NikoflowDepth, nikoflowStateFromModeData } from "../nikoflow/state";
 import {
 	humanizePlanTitle,
@@ -2754,7 +2759,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async handleNikoflowCommand(rest?: string): Promise<void> {
+	async handleNikoflowCommand(rest?: string, options?: { source?: "keyword" | "command" }): Promise<void> {
 		try {
 			const text = (rest ?? "").trim();
 			if (this.planModeEnabled || this.planModePaused) {
@@ -2779,6 +2784,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			const depth = hasDepth ? (first as NikoflowDepth) : "standard";
 			const promptText = hasDepth ? tail.join(" ").trim() : filtered.join(" ").trim();
 
+			await this.#promptNikoflowModelRoles(depth, autonomous);
 			await this.session.activateNikoflowMode(depth, {
 				autonomous,
 				deferHumanGateMint: promptText.length > 0 && !autonomous,
@@ -2788,8 +2794,48 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.onInputCallback(this.startPendingSubmission({ text: promptText }));
 			}
 		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
+			const message = error instanceof Error ? error.message : String(error);
+			const shellHint =
+				options?.source === "keyword"
+					? `\nRun \`${APP_NAME} nikoflow:<depth> "task"\` from the shell if mid-chat activation is unavailable.`
+					: "";
+			this.showError(`${message}${shellHint}`);
 		}
+	}
+
+	async #promptNikoflowModelRoles(depth: NikoflowDepth, autonomous: boolean): Promise<void> {
+		const args = {
+			nikoflowDepth: depth,
+			nikoflowBatch: autonomous,
+			print: false,
+			mode: undefined,
+			model: undefined,
+			plan: undefined,
+			nikoflowQa: undefined,
+		};
+		if (
+			!shouldPromptNikoflowModelRoles(args, {
+				interactive: true,
+				stdinIsTTY: process.stdin.isTTY,
+				stdoutIsTTY: process.stdout.isTTY,
+			})
+		) {
+			return;
+		}
+		const selections = await promptNikoflowModelRoles({
+			args,
+			settings: this.session.settings,
+			modelRegistry: this.session.modelRegistry,
+		});
+		this.#applyNikoflowRoleSelections(selections);
+	}
+
+	#applyNikoflowRoleSelections(selections: NikoflowRoleSelections): void {
+		const overrides: Record<string, string> = {};
+		if (selections.default) overrides.default = selections.default.selector;
+		if (selections.plan) overrides.plan = selections.plan.selector;
+		if (selections.advisor) overrides.advisor = selections.advisor.selector;
+		this.session.settings.overrideModelRoles(overrides);
 	}
 
 	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {
