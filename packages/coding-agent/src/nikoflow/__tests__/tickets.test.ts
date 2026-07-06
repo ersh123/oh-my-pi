@@ -3,6 +3,7 @@ import {
 	getNextTicket,
 	markStatus,
 	type NikoflowTicket,
+	normalizeDefinedTickets,
 	parseTicketTodoContent,
 	ticketDagFromTodoPhases,
 	validateTicketDag,
@@ -47,6 +48,23 @@ describe("nikoflow tickets", () => {
 		expect(updated[0]).not.toBe(tickets[0]);
 		expect(tickets[0].status).toBe("todo");
 		expect(updated[0].status).toBe("green");
+	});
+
+	test("rejects fields that would corrupt todo-state round trips", () => {
+		const result = normalizeDefinedTickets([
+			{
+				id: "TSK:001",
+				acceptance: ["a | b", " notes="],
+				blocked_by: ["TSK,000"],
+				implementation_notes: "keep notes=hostile",
+			},
+		]);
+
+		expect(result.errors.join("\n")).toContain("id must match ^[A-Za-z0-9_-]+$");
+		expect(result.errors.join("\n")).toContain("acceptance 1 contains a reserved todo delimiter");
+		expect(result.errors.join("\n")).toContain("acceptance 2 contains a reserved todo delimiter");
+		expect(result.errors.join("\n")).toContain("blocked_by TSK,000 must match ^[A-Za-z0-9_-]+$");
+		expect(result.errors.join("\n")).toContain("implementation_notes contains a reserved todo delimiter");
 	});
 
 	test("parses ticket DAG from todo state", () => {

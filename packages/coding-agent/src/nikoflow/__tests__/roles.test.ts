@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
-import { logger } from "@oh-my-pi/pi-utils";
+import { describe, expect, test } from "bun:test";
 import {
 	assertNikoflowRoleRails,
 	type RoleModelResolver,
@@ -9,10 +8,6 @@ import {
 } from "../roles";
 
 describe("nikoflow roles", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
 	test("maps phases to required model roles", () => {
 		expect(roleForPhase("grilling")).toBe("plan");
 		expect(roleForPhase("adr")).toBe("plan");
@@ -44,14 +39,9 @@ describe("nikoflow roles", () => {
 		});
 	});
 
-	test("warns when advisor resolves to the default model", () => {
-		const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
-		const roles = assertNikoflowRoleRails(role => (role === "plan" ? "strong" : "cheap"));
-
-		expect(roles).toEqual({ plan: "strong", default: "cheap", advisor: "cheap" });
-		expect(warn).toHaveBeenCalledWith(
-			"Nikoflow modelRoles.advisor equals modelRoles.default; independence is context-level only.",
-			{ advisor: "cheap" },
+	test("fails fast when advisor resolves to the default model", () => {
+		expect(() => assertNikoflowRoleRails(role => (role === "plan" ? "strong" : "cheap"))).toThrow(
+			"Nikoflow requires the QA/advisor model to differ from the executor (default) model for an independent review.",
 		);
 	});
 

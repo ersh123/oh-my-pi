@@ -141,10 +141,11 @@ export function parseNikoflowKeywordInput(text: string): NikoflowKeywordInput | 
 export async function tryHandleNikoflowKeywordInput(
 	text: string,
 	target: NikoflowKeywordTarget,
-	options: { hasImages: boolean },
+	options: { hasImages: boolean; nikoflowActive?: boolean },
 ): Promise<boolean> {
 	const parsed = parseNikoflowKeywordInput(text);
 	if (!parsed) return false;
+	if (options.nikoflowActive && ("error" in parsed || parsed.rest)) return false;
 	if ("error" in parsed) {
 		target.showWarning(parsed.error);
 		return true;
@@ -725,7 +726,13 @@ export class InputController {
 
 			if (!text && !hasInputImages) return;
 
-			if (text && (await tryHandleNikoflowKeywordInput(text, this.ctx, { hasImages: hasInputImages }))) {
+			if (
+				text &&
+				(await tryHandleNikoflowKeywordInput(text, this.ctx, {
+					hasImages: hasInputImages,
+					nikoflowActive: Boolean(this.ctx.session.getNikoflowState()),
+				}))
+			) {
 				this.ctx.editor.addToHistory(text);
 				this.ctx.editor.clearDraft();
 				return;

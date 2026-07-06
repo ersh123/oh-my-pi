@@ -95,6 +95,12 @@ function cleanList(values: readonly string[]): string[] {
 	return values.map(value => value.trim()).filter(Boolean);
 }
 
+const TICKET_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+function hasTodoTextDelimiter(value: string): boolean {
+	return value.includes(" | ") || value.includes("notes=");
+}
+
 export function normalizeDefinedTickets(inputs: readonly NikoflowTicketInput[]): NikoflowTicketDefinitionResult {
 	const errors: string[] = [];
 	const tickets: NikoflowTicket[] = inputs.map((input, index) => {
@@ -105,8 +111,28 @@ export function normalizeDefinedTickets(inputs: readonly NikoflowTicketInput[]):
 		const implementation_notes = input.implementation_notes.trim();
 
 		if (!id) errors.push(`ticket ${position} id is required`);
+		if (id && !TICKET_ID_PATTERN.test(id)) {
+			errors.push(`ticket ${id} id must match ^[A-Za-z0-9_-]+$ for durable resume; re-issue the ticket DAG.`);
+		}
 		if (acceptance.length === 0) errors.push(`ticket ${id || position} acceptance must not be empty`);
+		acceptance.forEach((item, itemIndex) => {
+			if (hasTodoTextDelimiter(item)) {
+				errors.push(
+					`ticket ${id || position} acceptance ${itemIndex + 1} contains a reserved todo delimiter; re-issue the ticket DAG without " | " or "notes=" in acceptance text.`,
+				);
+			}
+		});
+		for (const dep of blocked_by) {
+			if (!TICKET_ID_PATTERN.test(dep)) {
+				errors.push(`ticket ${id || position} blocked_by ${dep} must match ^[A-Za-z0-9_-]+$ for durable resume.`);
+			}
+		}
 		if (!implementation_notes) errors.push(`ticket ${id || position} implementation_notes is required`);
+		if (implementation_notes.includes(" notes=")) {
+			errors.push(
+				`ticket ${id || position} implementation_notes contains a reserved todo delimiter; re-issue the ticket DAG without " notes=" in notes.`,
+			);
+		}
 
 		return {
 			id,

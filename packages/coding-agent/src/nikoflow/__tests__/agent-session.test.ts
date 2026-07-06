@@ -59,6 +59,7 @@ async function createFixture(cwd: string, root: string): Promise<SessionFixture>
 	authStorage.setRuntimeApiKey("openai", "test-key");
 	const settings = Settings.isolated({ "compaction.enabled": false });
 	settings.setModelRole("plan", "openai/gpt-4o-mini");
+	settings.setModelRole("default", "anthropic/claude-haiku-4-5");
 	settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 	const modelRegistry = new ModelRegistry(authStorage, path.join(root, "models.yml"));
 	const session = new AgentSession({

@@ -94,4 +94,21 @@ describe("nikoflow CLI activation guard", () => {
 		expect(normalHandled).toBe(false);
 		expect(activations).toEqual(["разработай X"]);
 	});
+
+	test("does not consume nikoflow keyword mentions while a flow is active", async () => {
+		const handled = await tryHandleNikoflowKeywordInput(
+			"nikoflow keep working from the current ticket",
+			{
+				handleNikoflowCommand: async () => {
+					throw new Error("must stay on the normal prompt path");
+				},
+				showWarning: () => {
+					throw new Error("unexpected warning");
+				},
+			},
+			{ hasImages: false, nikoflowActive: true },
+		);
+
+		expect(handled).toBe(false);
+	});
 });
