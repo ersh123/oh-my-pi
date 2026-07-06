@@ -363,6 +363,9 @@ export function advanceNikoflowHumanGate<TMessage>(
 	if (acceptedAfter === null) {
 		return state.autonomous && state.batchGateAcceptedAt !== null ? { ...state, batchGateAcceptedAt: null } : state;
 	}
+	if (phase !== "grilling" && !state.phaseTurnStarted) {
+		return state.autonomous && state.batchGateAcceptedAt !== null ? { ...state, batchGateAcceptedAt: null } : state;
+	}
 	if (state.autonomous) {
 		if (phase === "tickets" && nikoflowTicketDagErrors(state).length > 0) {
 			return state.batchGateAcceptedAt === null ? state : { ...state, batchGateAcceptedAt: null };

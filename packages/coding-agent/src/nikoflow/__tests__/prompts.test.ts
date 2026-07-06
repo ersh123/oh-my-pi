@@ -9,7 +9,8 @@ describe("nikoflow prompts", () => {
 		expect(prompt).toContain("Nikoflow phase: grilling");
 		expect(prompt).toContain("Required role: plan");
 		expect(prompt).toContain("Mode: interactive");
-		expect(prompt).toContain("Gate request: g1");
+		expect(prompt).not.toContain("Gate request:");
+		expect(prompt).not.toContain("g1");
 		expect(prompt).not.toContain("Execute phase");
 	});
 

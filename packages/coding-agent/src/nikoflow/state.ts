@@ -29,6 +29,7 @@ export interface NikoflowState {
 	depth: NikoflowDepth;
 	autonomous: boolean;
 	grillingMode: NikoflowGrillingMode | null;
+	originalTask: string;
 	phaseIndex: number;
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
@@ -42,6 +43,7 @@ export interface NikoflowModeData {
 	depth: NikoflowDepth;
 	autonomous: boolean;
 	grillingMode: NikoflowGrillingMode | null;
+	originalTask: string;
 	phaseIndex: number;
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
@@ -56,12 +58,13 @@ function normalizeGrillingMode(value: unknown): NikoflowGrillingMode | null {
 
 export function createState(
 	depth: NikoflowDepth,
-	options: { autonomous?: boolean; grillingMode?: NikoflowGrillingMode | null } = {},
+	options: { autonomous?: boolean; grillingMode?: NikoflowGrillingMode | null; originalTask?: string } = {},
 ): NikoflowState {
 	return {
 		depth,
 		autonomous: options.autonomous === true,
 		grillingMode: normalizeGrillingMode(options.grillingMode),
+		originalTask: typeof options.originalTask === "string" ? options.originalTask : "",
 		phaseIndex: 0,
 		gateRequestId: null,
 		gateMintedAt: null,
@@ -77,6 +80,7 @@ export function nikoflowModeData(state: NikoflowState): NikoflowModeData {
 		depth: state.depth,
 		autonomous: state.autonomous,
 		grillingMode: state.grillingMode,
+		originalTask: state.originalTask,
 		phaseIndex: state.phaseIndex,
 		gateRequestId: state.gateRequestId,
 		gateMintedAt: state.gateMintedAt,
@@ -93,6 +97,7 @@ export function nikoflowStateFromModeData(
 	const state = createState(depth as NikoflowDepth, {
 		autonomous: modeData?.autonomous === true,
 		grillingMode: normalizeGrillingMode(modeData.grillingMode),
+		originalTask: typeof modeData.originalTask === "string" ? modeData.originalTask : "",
 	});
 	const phases = materializePhases(state.depth);
 	const phaseIndex = modeData.phaseIndex;

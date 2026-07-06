@@ -56,7 +56,6 @@ export function getPhasePrompt(state: NikoflowState): string {
 		`Nikoflow phase: ${phase}`,
 		`Required role: ${currentRole(state)}`,
 		`Mode: ${state.autonomous ? "batch" : "interactive"}`,
-		`Gate request: ${state.gateRequestId ?? "none"}`,
 		phasePrompt(state, phase),
 		...ticketContext,
 		"Visible artifacts only. Do not rely on hidden reasoning across phase boundaries.",

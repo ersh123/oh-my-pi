@@ -90,11 +90,12 @@ describe("nikoflow state", () => {
 	});
 
 	test("round-trips grilling mode through mode data", () => {
-		const state = createState("standard", { grillingMode: "interview" });
+		const state = createState("standard", { grillingMode: "interview", originalTask: "fix the gate" });
 		const restored = nikoflowStateFromModeData(nikoflowModeData(state));
 
 		expect(state.grillingMode).toBe("interview");
 		expect(restored?.grillingMode).toBe("interview");
+		expect(restored?.originalTask).toBe("fix the gate");
 	});
 
 	test("restores missing or unknown grilling mode as null", () => {

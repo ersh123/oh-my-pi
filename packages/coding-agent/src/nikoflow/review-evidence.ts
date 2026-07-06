@@ -4,6 +4,11 @@ interface GitResult {
 	exitCode: number;
 }
 
+export interface NikoflowReviewEvidence {
+	diff: string;
+	hasReviewableChange: boolean;
+}
+
 async function runGit(cwd: string, args: readonly string[]): Promise<GitResult> {
 	const proc = Bun.spawn(["git", ...args], {
 		cwd,
@@ -24,6 +29,10 @@ function section(title: string, body: string): string {
 
 function failedSection(title: string, result: GitResult): string {
 	return `${title}\nfailed: ${result.stderr.trim() || `exit ${result.exitCode}`}`;
+}
+
+function statusHasChange(stdout: string): boolean {
+	return stdout.split("\n").some(line => line.trim().length > 0 && !line.startsWith("##"));
 }
 
 async function committedDiff(cwd: string): Promise<string | null> {
@@ -59,9 +68,10 @@ async function untrackedPatches(cwd: string): Promise<string | null> {
 	return patches.join("\n\n");
 }
 
-export async function collectNikoflowReviewDiff(cwd: string): Promise<string> {
+export async function collectNikoflowReviewEvidence(cwd: string): Promise<NikoflowReviewEvidence> {
 	const status = await runGit(cwd, ["status", "--porcelain=v1", "--branch", "--untracked-files=all"]);
 	const headDiff = await runGit(cwd, ["diff", "--no-ext-diff", "HEAD", "--"]);
+	const stashList = await runGit(cwd, ["stash", "list"]);
 	const sections = [
 		status.exitCode === 0
 			? section("git status --porcelain=v1 --branch --untracked-files=all", status.stdout)
@@ -69,10 +79,25 @@ export async function collectNikoflowReviewDiff(cwd: string): Promise<string> {
 		headDiff.exitCode === 0
 			? section("git diff --no-ext-diff HEAD --", headDiff.stdout)
 			: failedSection("git diff --no-ext-diff HEAD --", headDiff),
+		stashList.exitCode === 0
+			? section("git stash list", stashList.stdout)
+			: failedSection("git stash list", stashList),
 	];
 	const committed = await committedDiff(cwd);
 	if (committed) sections.push(committed);
 	const untracked = await untrackedPatches(cwd);
 	if (untracked) sections.push(untracked);
-	return sections.join("\n\n");
+	return {
+		diff: sections.join("\n\n"),
+		hasReviewableChange:
+			(status.exitCode === 0 && statusHasChange(status.stdout)) ||
+			(headDiff.exitCode === 0 && headDiff.stdout.trim().length > 0) ||
+			(stashList.exitCode === 0 && stashList.stdout.trim().length > 0) ||
+			committed !== null ||
+			untracked !== null,
+	};
+}
+
+export async function collectNikoflowReviewDiff(cwd: string): Promise<string> {
+	return (await collectNikoflowReviewEvidence(cwd)).diff;
 }

@@ -54,6 +54,7 @@ function stateWithGate(random: () => number, gateRequestId: string | null): Niko
 		depth: selectedDepth,
 		autonomous: false,
 		grillingMode: modeRoll === 0 ? null : modeRoll === 1 ? "interview" : "brief",
+		originalTask: "",
 		phaseIndex: int(random, materializePhases(selectedDepth).length + 5) - 2,
 		gateRequestId,
 		gateMintedAt: gateRequestId ? int(random, 1_000_000) : null,

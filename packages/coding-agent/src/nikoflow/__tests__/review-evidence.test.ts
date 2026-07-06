@@ -36,6 +36,9 @@ describe("nikoflow review evidence", () => {
 			await Bun.write(path.join(repo, "committed.txt"), "committed evidence\n");
 			git(repo, ["add", "committed.txt"]);
 			git(repo, ["commit", "-m", "committed"]);
+			await Bun.write(path.join(repo, "stashed.txt"), "stashed evidence\n");
+			git(repo, ["add", "stashed.txt"]);
+			git(repo, ["stash", "push", "-m", "hidden work"]);
 			await Bun.write(path.join(repo, "staged.txt"), "staged evidence\n");
 			git(repo, ["add", "staged.txt"]);
 			await Bun.write(path.join(repo, "untracked.txt"), "untracked evidence\n");
@@ -44,6 +47,8 @@ describe("nikoflow review evidence", () => {
 
 			expect(diff).toContain("git status --porcelain");
 			expect(diff).toContain("git diff --no-ext-diff HEAD --");
+			expect(diff).toContain("git stash list");
+			expect(diff).toContain("hidden work");
 			expect(diff).toContain("A  staged.txt");
 			expect(diff).toContain("?? untracked.txt");
 			expect(diff).toContain("+staged evidence");

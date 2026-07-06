@@ -31,6 +31,7 @@ import {
 	markPhaseTurnStarted,
 	mintGateRequest,
 	type NikoflowState,
+	rotateGateRequest,
 	setTicketDag,
 } from "../state";
 import type { NikoflowTicket } from "../tickets";
@@ -217,7 +218,12 @@ describe("nikoflow mode callback helpers", () => {
 			now: () => 20,
 		};
 
-		const adr = mintGateRequest(advancePhase(createState("standard")), "gate-1", 10);
+		const preArtifact = mintGateRequest(advancePhase(createState("standard")), "gate-1", 10);
+		const rejected = advanceNikoflowHumanGate(preArtifact, [{ role: "user", timestamp: 11 }], options);
+		expect(currentPhase(rejected)).toBe("adr");
+		expect(rejected.gateRequestId).toBe("gate-1");
+
+		const adr = markPhaseTurnStarted(preArtifact);
 		const prd = advanceNikoflowHumanGate(adr, [{ role: "user", timestamp: 11 }], options);
 		expect(currentPhase(prd)).toBe("prd");
 		expect(prd.gateRequestId).toBeNull();
@@ -436,7 +442,9 @@ describe("nikoflow mode callback helpers", () => {
 	});
 
 	test("batch ADR gate advances through advisor review instead of a human turn", () => {
-		const adr = mintGateRequest(advancePhase(createState("standard", { autonomous: true })), "adr-gate", 10);
+		const adr = markPhaseTurnStarted(
+			mintGateRequest(advancePhase(createState("standard", { autonomous: true })), "adr-gate", 10),
+		);
 		const ready = advanceNikoflowHumanGate(adr, [], {
 			isGenuineUserTurn: () => false,
 			messageTimestamp: () => undefined,
@@ -1152,7 +1160,7 @@ describe("nikoflow mode callback helpers", () => {
 		expect(externalActions[0]).toContain("yielding instead of queuing another follow-up");
 	});
 
-	test("advisor blocker retry re-enters verify with a fresh gate and advisor review", async () => {
+	test("advisor blocker retry uses the rotated production gate for the next fix review", async () => {
 		let gateCounter = 0;
 		let reviewerAttempt = 0;
 		let state = markPhaseTurnStarted(advancePhase(createState("tactical")));
@@ -1184,36 +1192,32 @@ describe("nikoflow mode callback helpers", () => {
 				return result.advisorReview;
 			},
 			requestAdvisorReview: async current => {
-				if (!current.phaseTurnStarted) return host.requestAdvisorReview?.(current);
-				const result = await enterNikoflowPhase(host, currentPhase(current), currentPhase(current), current, {
-					nextGateRequestId: () => `gate-${++gateCounter}`,
-					now: () => 100 + gateCounter,
-				});
-				return result.advisorReview;
+				return host.requestAdvisorReview?.(current);
 			},
 			advanceAdvisorGate: (current, review) => {
 				state = advanceNikoflowAdvisorGate(current, review);
 			},
 			onAdvisorBlock: current => {
 				blocked.push(current.gateRequestId ?? "none");
+				state = rotateGateRequest(
+					{ ...current, phaseTurnStarted: false },
+					`gate-${++gateCounter}`,
+					100 + gateCounter,
+				);
 			},
 		});
 
 		await bundle.onBeforeYield();
 		expect(currentPhase(state)).toBe("verify");
-		expect(state.gateRequestId).toBe("gate-1");
+		expect(state.gateRequestId).toBe("gate-2");
+		expect(state.phaseTurnStarted).toBe(false);
 		expect(blocked).toEqual(["gate-1"]);
 		expect(events).toEqual(["role:advisor", "state:verify:gate-1", "context:verify:gate-1", "advisor:gate-1"]);
 
 		state = markPhaseTurnStarted(state);
 		await bundle.onBeforeYield();
 		expect(isComplete(state)).toBe(true);
-		expect(events.slice(4)).toEqual([
-			"role:advisor",
-			"state:verify:gate-2",
-			"context:verify:gate-2",
-			"advisor:gate-2",
-		]);
+		expect(events.slice(4)).toEqual(["advisor:gate-2"]);
 	});
 
 	test("verify gate passes only after a clean native advisor review", async () => {
