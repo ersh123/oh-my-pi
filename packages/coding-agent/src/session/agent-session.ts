@@ -265,6 +265,7 @@ import {
 	markPhaseTurnStarted,
 	type NikoflowDepth,
 	type NikoflowState,
+	nikoflowModeData,
 	setTicketDag,
 } from "../nikoflow/state";
 import {
@@ -907,6 +908,7 @@ export interface AgentSessionNikoflowActivationOptions {
 	sendContext?: boolean;
 	deferHumanGateMint?: boolean;
 	autonomous?: boolean;
+	initialState?: NikoflowState;
 }
 
 /** Result from a handoff operation. */
@@ -1638,6 +1640,7 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	#nikoflowState: NikoflowState | undefined;
 	#nikoflowCallbacks: InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective> | undefined;
+	#lastNikoflowModeDataKey: string | undefined;
 	#nikoflowGateCounter = 0;
 	#nikoflowAdvisorReviewAttempts = new Map<string, number>();
 	#nikoflowAdvisorReviewCapture?: NikoflowAdvisorReviewCapture;
@@ -6942,8 +6945,21 @@ export class AgentSession {
 		return this.#nikoflowState;
 	}
 
-	setNikoflowState(state: NikoflowState | undefined): void {
+	#persistNikoflowModeState(state: NikoflowState): void {
+		const modeData: Record<string, unknown> = { ...nikoflowModeData(state) };
+		const key = JSON.stringify(modeData);
+		if (this.#lastNikoflowModeDataKey === key) return;
+		this.#lastNikoflowModeDataKey = key;
+		this.sessionManager.appendModeChange("nikoflow", modeData);
+	}
+
+	setNikoflowState(state: NikoflowState | undefined, options: { persist?: boolean } = {}): void {
 		this.#nikoflowState = state;
+		if (!state) {
+			this.#lastNikoflowModeDataKey = undefined;
+			return;
+		}
+		if (options.persist !== false) this.#persistNikoflowModeState(state);
 	}
 
 	#markNikoflowModelTurnCompleted(): void {
@@ -7045,6 +7061,8 @@ export class AgentSession {
 			sendContext?: boolean;
 			requestAdvisorReview?: boolean;
 			deliverAs?: "steer" | "followUp" | "nextTurn" | null;
+			persist?: boolean;
+			persistTickets?: boolean;
 		} = {},
 	): Promise<unknown | null | undefined> {
 		const nextPhase = currentPhase(next);
@@ -7054,7 +7072,7 @@ export class AgentSession {
 			{
 				resolveRoleModelWithThinking: role => this.resolveRoleModelWithThinking(role),
 				applyRoleModel: entry => this.applyRoleModel(entry),
-				setState: state => this.setNikoflowState(state),
+				setState: state => this.setNikoflowState(state, { persist: options.persist }),
 				sendNikoflowContext: state =>
 					this.#sendNikoflowContextForState(state, deliverAs ? { deliverAs } : undefined),
 				requestAdvisorReview: state => this.#requestNikoflowAdvisorReview(state),
@@ -7070,7 +7088,7 @@ export class AgentSession {
 				requestAdvisorReview: options.requestAdvisorReview,
 			},
 		);
-		if (result.state.tickets.length > 0) {
+		if (options.persistTickets !== false && result.state.tickets.length > 0) {
 			this.#persistNikoflowTicketDag(result.state.tickets);
 		}
 		this.#queueNikoflowDefineTicketsToolChoice(result.state);
@@ -7105,7 +7123,8 @@ export class AgentSession {
 		const next = advanceNikoflowHumanGate(state, messages, {
 			isGenuineUserTurn: isUserQueuedMessage,
 			messageTimestamp: agentMessageTimestamp,
-			messageText: assistantMessageText,
+			messageToolName: message => (message.role === "toolResult" ? message.toolName : undefined),
+			messageToolResult: message => (message.role === "toolResult" ? message.details : undefined),
 			nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
 			now: () => Date.now(),
 		});
@@ -7420,24 +7439,25 @@ export class AgentSession {
 		this.#nikoflowAdvisorReviewAttempts.clear();
 		this.#nikoflowCallbacks?.uninstall();
 		this.#nikoflowCallbacks = undefined;
-		const state = createState(depth, { autonomous: options.autonomous });
+		const state = options.initialState
+			? this.#withNikoflowTicketDagFromPersistedState(options.initialState)
+			: createState(depth, { autonomous: options.autonomous });
 		try {
 			this.#nikoflowCallbacks = await this.installNikoflowMode({
 				isGateSatisfied: current => current.gateRequestId === null,
 			});
 			await this.#enterNikoflowPhase(undefined, state, {
-				mintGate: !options.deferHumanGateMint,
+				mintGate: options.initialState ? false : !options.deferHumanGateMint,
 				sendContext: options.sendContext !== false,
 				deliverAs: null,
+				persist: options.persist,
+				persistTickets: options.persist,
 			});
 		} catch (error) {
 			this.#nikoflowCallbacks?.uninstall();
 			this.#nikoflowCallbacks = undefined;
 			this.setNikoflowState(undefined);
 			throw error;
-		}
-		if (options.persist !== false) {
-			this.sessionManager.appendModeChange("nikoflow", { depth, autonomous: state.autonomous });
 		}
 	}
 
@@ -7609,6 +7629,12 @@ export class AgentSession {
 	): Promise<InstalledNikoflowCallbacks<AgentMessage[], AgentTurnEndContext, ToolChoiceDirective>> {
 		const session = this;
 		const previousBeforeToolCall = session.agent.beforeToolCall;
+		const nikoflowToolSource = (context: BeforeToolCallContext): "builtin" | "custom" => {
+			const activeTool = (context.context.tools ?? []).find(
+				tool => tool.name === context.toolCall.name || tool.customWireName === context.toolCall.name,
+			);
+			return activeTool && session.hasBuiltInTool(activeTool.name) ? "builtin" : "custom";
+		};
 		return installNikoflowAgentSessionMode<
 			AgentMessage[],
 			AgentTurnEndContext,
@@ -7625,7 +7651,8 @@ export class AgentSession {
 				},
 				set beforeToolCall(fn) {
 					session.agent.beforeToolCall = fn
-						? (context: BeforeToolCallContext, signal?: AbortSignal) => fn(context, signal)
+						? (context: BeforeToolCallContext, signal?: AbortSignal) =>
+								fn({ ...context, toolSource: nikoflowToolSource(context) }, signal)
 						: undefined;
 				},
 				getOnTurnEnd: () => session.agent.getOnTurnEnd(),
@@ -7653,9 +7680,11 @@ export class AgentSession {
 							{ deliverAs: "followUp" },
 						);
 					}),
-				advanceHumanGate: messages => {
+				advanceHumanGate: (messages, _signal, context) => {
 					session.#markNikoflowModelTurnCompleted();
-					return session.#advanceNikoflowHumanGate(messages);
+					const gateMessages =
+						context && context.toolResults.length > 0 ? [...messages, ...context.toolResults] : messages;
+					return session.#advanceNikoflowHumanGate(gateMessages);
 				},
 				advanceExecuteGate: state => {
 					return session.#advanceNikoflowExecuteGate(state);

@@ -34,6 +34,15 @@ export interface NikoflowState {
 	activeTicketId: string | null;
 }
 
+export interface NikoflowModeData {
+	depth: NikoflowDepth;
+	autonomous: boolean;
+	phaseIndex: number;
+	gateRequestId: string | null;
+	gateMintedAt: number | null;
+	batchGateAcceptedAt: number | null;
+}
+
 export function createState(depth: NikoflowDepth, options: { autonomous?: boolean } = {}): NikoflowState {
 	return {
 		depth,
@@ -45,6 +54,40 @@ export function createState(depth: NikoflowDepth, options: { autonomous?: boolea
 		phaseTurnStarted: false,
 		tickets: [],
 		activeTicketId: null,
+	};
+}
+
+export function nikoflowModeData(state: NikoflowState): NikoflowModeData {
+	return {
+		depth: state.depth,
+		autonomous: state.autonomous,
+		phaseIndex: state.phaseIndex,
+		gateRequestId: state.gateRequestId,
+		gateMintedAt: state.gateMintedAt,
+		batchGateAcceptedAt: state.batchGateAcceptedAt,
+	};
+}
+
+export function nikoflowStateFromModeData(
+	modeData: NikoflowModeData | Record<string, unknown> | undefined,
+): NikoflowState | null {
+	if (!modeData) return null;
+	const depth = modeData.depth;
+	if (typeof depth !== "string" || !NIKOFLOW_DEPTHS.includes(depth as NikoflowDepth)) return null;
+	const state = createState(depth as NikoflowDepth, { autonomous: modeData?.autonomous === true });
+	const phases = materializePhases(state.depth);
+	const phaseIndex = modeData.phaseIndex;
+	if (typeof phaseIndex !== "number" || !Number.isInteger(phaseIndex)) return state;
+	if (phaseIndex < 0 || phaseIndex > phases.length) return state;
+	const gateRequestId = modeData.gateRequestId;
+	const gateMintedAt = modeData.gateMintedAt;
+	const batchGateAcceptedAt = modeData.batchGateAcceptedAt;
+	return {
+		...state,
+		phaseIndex,
+		gateRequestId: typeof gateRequestId === "string" && gateRequestId.length > 0 ? gateRequestId : null,
+		gateMintedAt: typeof gateMintedAt === "number" ? gateMintedAt : null,
+		batchGateAcceptedAt: typeof batchGateAcceptedAt === "number" ? batchGateAcceptedAt : null,
 	};
 }
 

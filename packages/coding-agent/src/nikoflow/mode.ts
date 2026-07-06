@@ -1,4 +1,10 @@
-import { humanGateAccepted, jsonRecordFromValue, normalizeNikoflowGrillingMarker } from "./gates";
+import { isBuiltinToolName, normalizeToolName } from "../tools/builtin-names";
+import {
+	humanGateAccepted,
+	jsonRecordFromValue,
+	NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME,
+	normalizeNikoflowGrillingConvergence,
+} from "./gates";
 import { assertNikoflowRoleRails } from "./roles";
 import {
 	advancePhase,
@@ -16,8 +22,9 @@ import { getNextTicket, markStatus, NIKOFLOW_DEFINE_TICKETS_TOOL_NAME, validateT
 const MAX_GATE_HOLD_FOLLOW_UPS = 3;
 
 export interface MinimalToolCallContext {
-	toolCall: { name?: string; toolName?: string };
+	toolCall: { name?: string; toolName?: string; source?: string; kind?: string };
 	args: Record<string, unknown>;
+	toolSource?: string;
 }
 
 export interface BeforeToolCallResult {
@@ -132,7 +139,8 @@ export interface NikoflowSessionRoleEntry<TModel extends NikoflowSessionModel, T
 export interface NikoflowHumanGateAdvanceOptions<TMessage> {
 	isGenuineUserTurn: (message: TMessage) => boolean;
 	messageTimestamp: (message: TMessage) => number | undefined;
-	messageText?: (message: TMessage) => string | undefined;
+	messageToolName?: (message: TMessage) => string | undefined;
+	messageToolResult?: (message: TMessage) => unknown | undefined;
 	nextGateRequestId: () => string;
 	now: () => number;
 }
@@ -263,36 +271,50 @@ export async function enterNikoflowPhase<
 	return { state: entered, advisorReview };
 }
 
-const READ_ONLY_PHASE_ALLOWED_TOOLS = new Set([
-	"advise",
-	"ask",
-	"ast_grep",
-	"find",
-	"glob",
-	"grep",
-	"inspect_image",
-	"list",
-	"ls",
-	NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
-	"plan",
-	"question",
-	"read",
-	"report_finding",
-	"request_user_input",
-	"search",
-	"search_tool_bm25",
-	"todo",
-	"update_plan",
-	"web_search",
-	"yield",
-]);
+const READ_ONLY_PHASE_ALLOWED_TOOLS = new Set(
+	[
+		"advise",
+		"ask",
+		"ast_grep",
+		"find",
+		"glob",
+		"grep",
+		"inspect_image",
+		"list",
+		"ls",
+		NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME,
+		NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
+		"plan",
+		"question",
+		"read",
+		"report_finding",
+		"request_user_input",
+		"search",
+		"search_tool_bm25",
+		"todo",
+		"update_plan",
+		"web_search",
+		"yield",
+	].map(normalizeToolName),
+);
 
 function toolName(context: MinimalToolCallContext): string {
-	return (context.toolCall.name ?? context.toolCall.toolName ?? "").toLowerCase();
+	return normalizeToolName(context.toolCall.name ?? context.toolCall.toolName ?? "");
+}
+
+function toolSource(context: MinimalToolCallContext): string | undefined {
+	const source = context.toolSource ?? context.toolCall.source ?? context.toolCall.kind;
+	return typeof source === "string" ? source.toLowerCase() : undefined;
+}
+
+function isKnownBuiltinTool(context: MinimalToolCallContext): boolean {
+	const source = toolSource(context);
+	if (source) return source === "builtin" || source === "built-in" || source === "built_in";
+	return isBuiltinToolName(toolName(context));
 }
 
 export function isNikoflowReadOnlyPhaseToolAllowed(context: MinimalToolCallContext): boolean {
-	return READ_ONLY_PHASE_ALLOWED_TOOLS.has(toolName(context));
+	return isKnownBuiltinTool(context) && READ_ONLY_PHASE_ALLOWED_TOOLS.has(toolName(context));
 }
 
 function readOnlyPhaseToolBlockReason(state: NikoflowState, phase: NikoflowPhase): string {
@@ -359,12 +381,15 @@ function grillingConvergenceMarkerAt<TMessage>(
 	messages: readonly TMessage[],
 	options: NikoflowHumanGateAdvanceOptions<TMessage>,
 ): number | null {
-	if (!options.messageText) return null;
+	if (!options.messageToolName || !options.messageToolResult) return null;
 	let convergedAt: number | null = null;
 	for (const message of messages) {
 		const timestamp = options.messageTimestamp(message);
 		if (!humanGateAccepted(gateMintedAt, timestamp)) continue;
-		const marker = normalizeNikoflowGrillingMarker(options.messageText(message));
+		if (normalizeToolName(options.messageToolName(message) ?? "") !== NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME) {
+			continue;
+		}
+		const marker = normalizeNikoflowGrillingConvergence(options.messageToolResult(message));
 		if (!marker) continue;
 		convergedAt = marker.openQuestions.length === 0 ? (timestamp ?? null) : null;
 	}
@@ -533,7 +558,7 @@ export function formatGateHoldMessage(state: NikoflowState): string {
 			if (currentPhase(state) === "grilling" && state.batchGateAcceptedAt === null) {
 				return [
 					"Nikoflow batch grilling gate is blocked; write the spec-completeness artifact.",
-					'Resolve every open question as an explicit human-unverified assumption, record risks, then emit {"nikoflow_grilling":{"open_questions":[],"assumptions":[...],"risks":[...]}}.',
+					`Resolve every open question as an explicit human-unverified assumption, record risks, then call ${NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME} with { open_questions: [], assumptions: [...], risks: [...] }.`,
 					"Yield for independent advisor review; do not self-approve.",
 				].join("\n");
 			}

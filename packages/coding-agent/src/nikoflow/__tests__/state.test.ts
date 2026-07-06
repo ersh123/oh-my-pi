@@ -12,8 +12,12 @@ import {
 	markPhaseTurnStarted,
 	materializePhases,
 	mintGateRequest,
+	nikoflowModeData,
+	nikoflowStateFromModeData,
 	rotateGateRequest,
+	setTicketDag,
 } from "../state";
+import type { NikoflowTicket } from "../tickets";
 
 describe("nikoflow state", () => {
 	test("materializes phases per depth", () => {
@@ -107,5 +111,42 @@ describe("nikoflow state", () => {
 		expect(started.phaseTurnStarted).toBe(true);
 		expect(execute.phaseTurnStarted).toBe(false);
 		expect(markPhaseTurnStarted(started)).toBe(started);
+	});
+
+	test("restores resumable mode data at execute and preserves recovered ticket statuses", () => {
+		let state = createState("standard", { autonomous: true });
+		state = advancePhase(advancePhase(advancePhase(advancePhase(state))));
+		state = mintGateRequest(state, "execute-gate", 123);
+
+		const restored = nikoflowStateFromModeData(nikoflowModeData(state));
+		expect(restored).not.toBeNull();
+		expect(currentPhase(restored!)).toBe("execute");
+		expect(restored!.gateRequestId).toBe("execute-gate");
+		expect(restored!.gateMintedAt).toBe(123);
+		expect(restored!.autonomous).toBe(true);
+
+		const tickets: NikoflowTicket[] = [
+			{
+				id: "TSK-001",
+				acceptance: ["base works"],
+				blocked_by: [],
+				implementation_notes: "base",
+				status: "done",
+			},
+			{
+				id: "TSK-002",
+				acceptance: ["next works"],
+				blocked_by: ["TSK-001"],
+				implementation_notes: "next",
+				status: "review",
+			},
+		];
+		const withTickets = setTicketDag(restored!, tickets);
+
+		expect(currentPhase(withTickets)).toBe("execute");
+		expect(withTickets.tickets.map(ticket => [ticket.id, ticket.status])).toEqual([
+			["TSK-001", "done"],
+			["TSK-002", "review"],
+		]);
 	});
 });

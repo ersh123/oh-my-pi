@@ -4,6 +4,8 @@ export interface NikoflowGrillingMarker {
 	risks: readonly string[];
 }
 
+export const NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME = "nikoflow_grilling_converged";
+
 export function jsonRecordFromValue(value: unknown): Record<string, unknown> | null {
 	if (value && typeof value === "object") return value as Record<string, unknown>;
 	if (typeof value !== "string") return null;
@@ -19,10 +21,9 @@ export function jsonRecordFromValue(value: unknown): Record<string, unknown> | n
 	return null;
 }
 
-export function normalizeNikoflowGrillingMarker(value: unknown): NikoflowGrillingMarker | null {
-	const root = jsonRecordFromValue(value);
-	const marker = jsonRecordFromValue(root?.nikoflow_grilling);
-	const openQuestions = stringList(marker?.open_questions);
+export function normalizeNikoflowGrillingConvergence(value: unknown): NikoflowGrillingMarker | null {
+	const marker = jsonRecordFromValue(value);
+	const openQuestions = stringList(marker?.openQuestions ?? marker?.open_questions);
 	if (!openQuestions) return null;
 	return {
 		openQuestions,

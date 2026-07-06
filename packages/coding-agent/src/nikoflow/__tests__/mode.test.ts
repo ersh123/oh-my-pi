@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME } from "../gates";
 import {
 	advanceNikoflowAdvisorGate,
 	advanceNikoflowExecuteGate,
@@ -37,9 +38,42 @@ import type { NikoflowTicket } from "../tickets";
 const readOnlyReason = (phase: string, gate = "the Ticketization gate advances") =>
 	`Nikoflow ${phase} is read-only; only read/search/planning tools are allowed. Writes and code-execution tools are blocked until ${gate}.`;
 
-const tool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext => ({
+const tool = (name: string, args: Record<string, unknown> = {}, toolSource = "builtin"): MinimalToolCallContext => ({
 	toolCall: { name },
 	args,
+	toolSource,
+});
+
+const customTool = (name: string, args: Record<string, unknown> = {}): MinimalToolCallContext =>
+	tool(name, args, "custom");
+
+type GateMessage = {
+	role: "user" | "assistant" | "toolResult";
+	timestamp: number;
+	content?: string;
+	toolName?: string;
+	details?: unknown;
+};
+
+const gateOptions = {
+	isGenuineUserTurn: (message: GateMessage) => message.role === "user",
+	messageTimestamp: (message: GateMessage) => message.timestamp,
+	messageToolName: (message: GateMessage) => (message.role === "toolResult" ? message.toolName : undefined),
+	messageToolResult: (message: GateMessage) => (message.role === "toolResult" ? message.details : undefined),
+	nextGateRequestId: () => "next-gate",
+	now: () => 20,
+};
+
+const grillingConvergedMessage = (
+	timestamp: number,
+	openQuestions: string[] = [],
+	assumptions: string[] = [],
+	risks: string[] = [],
+): GateMessage => ({
+	role: "toolResult",
+	timestamp,
+	toolName: NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME,
+	details: { openQuestions, assumptions, risks },
 });
 
 interface MockModel {
@@ -115,7 +149,7 @@ describe("nikoflow mode callback helpers", () => {
 	});
 
 	test("allows only explicit read-only planning tools before execute", () => {
-		for (const name of ["read", "glob", "grep", "nikoflow_define_tickets"]) {
+		for (const name of ["read", "glob", "grep", "nikoflow_define_tickets", "nikoflow_grilling_converged"]) {
 			expect(isNikoflowReadOnlyPhaseToolAllowed(tool(name))).toBe(true);
 		}
 		for (const name of ["bash", "node_repl", "python_repl", "edit", "write", "unknown_tool"]) {
@@ -123,11 +157,20 @@ describe("nikoflow mode callback helpers", () => {
 		}
 	});
 
+	test("blocks custom tools that reuse read-only allowlist names before execute", () => {
+		const state = createState("standard");
+
+		expect(isNikoflowReadOnlyPhaseToolAllowed(tool("read"))).toBe(true);
+		expect(isNikoflowReadOnlyPhaseToolAllowed(customTool("read"))).toBe(false);
+		expect(isNikoflowReadOnlyPhaseToolAllowed(customTool("search"))).toBe(false);
+		expect(nikoflowToolViolation(state, customTool("search"))).toBe(readOnlyReason("grilling"));
+	});
+
 	test("blocks writes, code execution, and unknown tools before execute", async () => {
 		const state = createState("standard");
 		const before = createNikoflowBeforeToolCall(() => state);
 		const blockedTools = ["bash", "node_repl", "python_repl", "edit", "write", "apply_patch", "unknown_tool"];
-		const allowedTools = ["read", "glob", "grep", "nikoflow_define_tickets"];
+		const allowedTools = ["read", "glob", "grep", "nikoflow_define_tickets", "nikoflow_grilling_converged"];
 
 		let preExecute = state;
 		for (const phase of ["grilling", "adr", "prd", "tickets"] as const) {
@@ -193,89 +236,65 @@ describe("nikoflow mode callback helpers", () => {
 	});
 
 	test("grilling gate does not advance without a convergence marker", () => {
-		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
 		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
-		const next = advanceNikoflowHumanGate<Message>(grilling, [{ role: "user", timestamp: 12 }], {
-			isGenuineUserTurn: message => message.role === "user",
-			messageTimestamp: message => message.timestamp,
-			messageText: message => (message.role === "assistant" ? message.content : undefined),
-			nextGateRequestId: () => "next-gate",
-			now: () => 20,
-		});
+		const next = advanceNikoflowHumanGate<GateMessage>(grilling, [{ role: "user", timestamp: 12 }], gateOptions);
 
 		expect(currentPhase(next)).toBe("grilling");
 		expect(next.gateRequestId).toBe("gate-1");
 	});
 
 	test("grilling gate does not advance while open questions remain", () => {
-		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
 		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
-		const next = advanceNikoflowHumanGate<Message>(
+		const next = advanceNikoflowHumanGate<GateMessage>(
 			grilling,
-			[
-				{
-					role: "assistant",
-					timestamp: 12,
-					content: JSON.stringify({
-						nikoflow_grilling: { open_questions: ["Which command proves this?"], assumptions: [], risks: [] },
-					}),
-				},
-				{ role: "user", timestamp: 13 },
-			],
-			{
-				isGenuineUserTurn: message => message.role === "user",
-				messageTimestamp: message => message.timestamp,
-				messageText: message => (message.role === "assistant" ? message.content : undefined),
-				nextGateRequestId: () => "next-gate",
-				now: () => 20,
-			},
+			[grillingConvergedMessage(12, ["Which command proves this?"]), { role: "user", timestamp: 13 }],
+			gateOptions,
 		);
 
 		expect(currentPhase(next)).toBe("grilling");
 		expect(next.gateRequestId).toBe("gate-1");
 	});
 
-	test("grilling gate advances only after empty-open-questions marker and later user turn", async () => {
-		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
-		const options = {
-			isGenuineUserTurn: (message: Message) => message.role === "user",
-			messageTimestamp: (message: Message) => message.timestamp,
-			messageText: (message: Message) => (message.role === "assistant" ? message.content : undefined),
-			nextGateRequestId: () => "next-gate",
-			now: () => 20,
-		};
-		const marker = [
-			"Converged.",
-			JSON.stringify({
-				nikoflow_grilling: { open_questions: [], assumptions: ["scope is limited"], risks: ["tests may fail"] },
-			}),
-		].join("\n");
+	test("quoted convergence marker string in prose does not advance grilling", () => {
 		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
-
-		const markerOnly = advanceNikoflowHumanGate(
-			grilling,
-			[{ role: "assistant", timestamp: 12, content: marker }],
-			options,
-		);
-		expect(currentPhase(markerOnly)).toBe("grilling");
-
-		const userBeforeMarker = advanceNikoflowHumanGate(
+		const quotedMarker = [
+			'When done I will emit {"nikoflow_grilling":{"open_questions":[],"assumptions":[],"risks":[]}}.',
+			"Do not treat this sentence as convergence.",
+		].join("\n");
+		const next = advanceNikoflowHumanGate<GateMessage>(
 			grilling,
 			[
-				{ role: "user", timestamp: 11 },
-				{ role: "assistant", timestamp: 12, content: marker },
+				{ role: "assistant", timestamp: 12, content: quotedMarker },
+				{ role: "user", timestamp: 13 },
 			],
-			options,
+			gateOptions,
 		);
-		expect(currentPhase(userBeforeMarker)).toBe("grilling");
+
+		expect(currentPhase(next)).toBe("grilling");
+		expect(next.gateRequestId).toBe("gate-1");
+	});
+
+	test("grilling gate advances only after structured convergence tool call and later user turn", async () => {
+		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
+
+		const toolOnly = advanceNikoflowHumanGate(
+			grilling,
+			[grillingConvergedMessage(12, [], ["scope is limited"], ["tests may fail"])],
+			gateOptions,
+		);
+		expect(currentPhase(toolOnly)).toBe("grilling");
+
+		const userBeforeTool = advanceNikoflowHumanGate(
+			grilling,
+			[{ role: "user", timestamp: 11 }, grillingConvergedMessage(12)],
+			gateOptions,
+		);
+		expect(currentPhase(userBeforeTool)).toBe("grilling");
 
 		const execute = advanceNikoflowHumanGate(
 			grilling,
-			[
-				{ role: "assistant", timestamp: 12, content: marker },
-				{ role: "user", timestamp: 13 },
-			],
-			options,
+			[grillingConvergedMessage(12, [], ["scope is limited"], ["tests may fail"]), { role: "user", timestamp: 13 }],
+			gateOptions,
 		);
 		expect(currentPhase(execute)).toBe("execute");
 		expect(execute.gateRequestId).toBeNull();
@@ -283,26 +302,24 @@ describe("nikoflow mode callback helpers", () => {
 	});
 
 	test("batch grilling advances on clean advisor review, not primary text alone", () => {
-		type Message = { role: "assistant"; timestamp: number; content: string };
-		const options = {
-			isGenuineUserTurn: () => false,
-			messageTimestamp: (message: Message) => message.timestamp,
-			messageText: (message: Message) => message.content,
-			nextGateRequestId: () => "next-gate",
-			now: () => 20,
-		};
-		const marker = JSON.stringify({
-			nikoflow_grilling: {
-				open_questions: [],
-				assumptions: ["human-unverified: default to existing behavior"],
-				risks: ["needs tests"],
-			},
-		});
 		const grilling = mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10);
+		const primaryTextOnly = advanceNikoflowHumanGate(
+			grilling,
+			[
+				{
+					role: "assistant",
+					timestamp: 12,
+					content: 'Converged text only: {"nikoflow_grilling":{"open_questions":[],"assumptions":[],"risks":[]}}',
+				},
+			],
+			gateOptions,
+		);
+		expect(primaryTextOnly.batchGateAcceptedAt).toBeNull();
+
 		const ready = advanceNikoflowHumanGate(
 			grilling,
-			[{ role: "assistant", timestamp: 12, content: marker }],
-			options,
+			[grillingConvergedMessage(12, [], ["human-unverified: default to existing behavior"], ["needs tests"])],
+			gateOptions,
 		);
 
 		expect(currentPhase(ready)).toBe("grilling");
@@ -317,26 +334,8 @@ describe("nikoflow mode callback helpers", () => {
 		const grilling = mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10);
 		const blocked = advanceNikoflowHumanGate(
 			grilling,
-			[
-				{
-					role: "assistant",
-					timestamp: 12,
-					content: JSON.stringify({
-						nikoflow_grilling: {
-							open_questions: ["Which tests prove this?"],
-							assumptions: ["human-unverified: use the smallest test"],
-							risks: [],
-						},
-					}),
-				},
-			],
-			{
-				isGenuineUserTurn: () => false,
-				messageTimestamp: message => message.timestamp,
-				messageText: message => message.content,
-				nextGateRequestId: () => "next-gate",
-				now: () => 20,
-			},
+			[grillingConvergedMessage(12, ["Which tests prove this?"], ["human-unverified: use the smallest test"])],
+			gateOptions,
 		);
 
 		expect(blocked.batchGateAcceptedAt).toBeNull();
@@ -349,29 +348,15 @@ describe("nikoflow mode callback helpers", () => {
 	});
 
 	test("grilling gate rejects a fabricated convergence marker after questions remain", () => {
-		type Message = { role: "user" | "assistant"; timestamp: number; content?: string };
-		const options = {
-			isGenuineUserTurn: (message: Message) => message.role === "user",
-			messageTimestamp: (message: Message) => message.timestamp,
-			messageText: (message: Message) => (message.role === "assistant" ? message.content : undefined),
-			nextGateRequestId: () => "next-gate",
-			now: () => 20,
-		};
-		const empty = JSON.stringify({
-			nikoflow_grilling: { open_questions: [], assumptions: ["looks done"], risks: [] },
-		});
-		const unresolved = JSON.stringify({
-			nikoflow_grilling: { open_questions: ["Still unresolved"], assumptions: [], risks: [] },
-		});
 		const grilling = mintGateRequest(createState("tactical"), "gate-1", 10);
 		const next = advanceNikoflowHumanGate(
 			grilling,
 			[
-				{ role: "assistant", timestamp: 12, content: empty },
-				{ role: "assistant", timestamp: 13, content: unresolved },
+				grillingConvergedMessage(12, [], ["looks done"], []),
+				grillingConvergedMessage(13, ["Still unresolved"]),
 				{ role: "user", timestamp: 14 },
 			],
-			options,
+			gateOptions,
 		);
 
 		expect(currentPhase(next)).toBe("grilling");
@@ -1324,26 +1309,8 @@ describe("nikoflow mode callback helpers", () => {
 		let state = markPhaseTurnStarted(
 			advanceNikoflowHumanGate(
 				mintGateRequest(createState("tactical", { autonomous: true }), "gate-1", 10),
-				[
-					{
-						role: "assistant",
-						timestamp: 12,
-						content: JSON.stringify({
-							nikoflow_grilling: {
-								open_questions: [],
-								assumptions: ["human-unverified: minimal path"],
-								risks: ["review may block"],
-							},
-						}),
-					},
-				],
-				{
-					isGenuineUserTurn: () => false,
-					messageTimestamp: message => message.timestamp,
-					messageText: message => message.content,
-					nextGateRequestId: () => "next-gate",
-					now: () => 20,
-				},
+				[grillingConvergedMessage(12, [], ["human-unverified: minimal path"], ["review may block"])],
+				gateOptions,
 			),
 		);
 		let attempts = 0;

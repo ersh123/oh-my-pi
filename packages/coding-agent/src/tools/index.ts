@@ -59,6 +59,7 @@ import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { NikoflowDefineTicketsTool } from "./nikoflow-define-tickets";
+import { NikoflowGrillingConvergedTool } from "./nikoflow-grilling-converged";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
@@ -99,6 +100,7 @@ export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
 export * from "./nikoflow-define-tickets";
+export * from "./nikoflow-grilling-converged";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
@@ -397,6 +399,7 @@ export const DEFAULT_ESSENTIAL_TOOL_NAMES: readonly string[] = [
 	"glob",
 	"eval",
 	"nikoflow_define_tickets",
+	"nikoflow_grilling_converged",
 ] as const;
 
 /**
@@ -472,6 +475,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	irc: IrcTool.createIf,
 	todo: s => new TodoTool(s),
 	nikoflow_define_tickets: s => new NikoflowDefineTicketsTool(s),
+	nikoflow_grilling_converged: () => new NikoflowGrillingConvergedTool(),
 	web_search: s => new WebSearchTool(s),
 	search_tool_bm25: SearchToolBm25Tool.createIf,
 	write: s => new WriteTool(s),

@@ -79,7 +79,7 @@ import {
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
-import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../nikoflow/state";
+import { NIKOFLOW_DEPTHS, type NikoflowDepth, nikoflowStateFromModeData } from "../nikoflow/state";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -1907,17 +1907,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 
-	#nikoflowDepthFromModeData(modeData: SessionContext["modeData"]): NikoflowDepth | undefined {
-		const depth = modeData?.depth;
-		return typeof depth === "string" && NIKOFLOW_DEPTHS.includes(depth as NikoflowDepth)
-			? (depth as NikoflowDepth)
-			: undefined;
-	}
-
-	#nikoflowAutonomousFromModeData(modeData: SessionContext["modeData"]): boolean {
-		return modeData?.autonomous === true;
-	}
-
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "agent_start") {
 			this.#goalTurnHadToolCalls = false;
@@ -2082,15 +2071,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.session.goalRuntime.clearAccounting();
 		if (sessionContext.mode === "nikoflow") {
-			const depth = this.#nikoflowDepthFromModeData(sessionContext.modeData);
-			if (!depth) {
+			const restoredState = nikoflowStateFromModeData(sessionContext.modeData);
+			if (!restoredState) {
 				this.sessionManager.appendModeChange("none");
 				return;
 			}
-			await this.session.activateNikoflowMode(depth, {
+			await this.session.activateNikoflowMode(restoredState.depth, {
 				persist: false,
 				sendContext: false,
-				autonomous: this.#nikoflowAutonomousFromModeData(sessionContext.modeData),
+				initialState: restoredState,
 			});
 			return;
 		}

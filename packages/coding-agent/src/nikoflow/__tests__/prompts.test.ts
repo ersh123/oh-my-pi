@@ -17,7 +17,8 @@ describe("nikoflow prompts", () => {
 		const prompt = getPhasePrompt(mintGateRequest(createState("standard", { autonomous: true }), "g1"));
 		expect(prompt).toContain("Mode: batch");
 		expect(prompt).toContain("unverified by a human");
-		expect(prompt).toContain('"open_questions":[]');
+		expect(prompt).toContain("nikoflow_grilling_converged");
+		expect(prompt).toContain("open_questions: []");
 	});
 
 	test("switches protocol by phase", () => {
