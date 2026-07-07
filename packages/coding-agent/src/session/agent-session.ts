@@ -13994,10 +13994,15 @@ export class AgentSession {
 	}
 
 	async #queueNikoflowRoleRecoveryYield(request: NikoflowRoleRecoveryRequest): Promise<void> {
+		const content = `Nikoflow ${request.role} model failed terminally: ${this.#nikoflowRecoveryFailureText(request.errorId, request.errorMessage)}. Recovery will pick a replacement after this turn yields; retry state and gate ids stay unchanged.`;
+		if (request.source === "terminal") {
+			this.emitNotice("warning", content, "nikoflow-role-recovery");
+			return;
+		}
 		await this.sendCustomMessage(
 			{
 				customType: "nikoflow-role-recovery",
-				content: `Nikoflow ${request.role} model failed terminally: ${this.#nikoflowRecoveryFailureText(request.errorId, request.errorMessage)}. Recovery will pick a replacement after this turn yields; retry state and gate ids stay unchanged.`,
+				content,
 				display: true,
 				attribution: "agent",
 				details: {
@@ -14141,7 +14146,22 @@ export class AgentSession {
 				return true;
 			}
 		}
-		return this.retry();
+		const didRetry = await this.retry();
+		if (didRetry) {
+			this.emitNotice(
+				"info",
+				`Nikoflow ${request.role} model switched from ${formatModelStringWithRouting(request.failedModel)} to ${selector}; resuming the failed turn.`,
+				"nikoflow-role-recovery",
+			);
+			return true;
+		}
+		if (request.source === "terminal") {
+			await this.#queueNikoflowRoleRecoveryEscalation(
+				request,
+				"retry could not resume because the failed assistant turn is no longer the conversation tail",
+			);
+		}
+		return false;
 	}
 
 	async #runNikoflowRoleRecovery(request: NikoflowRoleRecoveryRequest): Promise<void> {

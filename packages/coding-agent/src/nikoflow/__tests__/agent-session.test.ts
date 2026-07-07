@@ -509,6 +509,41 @@ describe("AgentSession Nikoflow security gates", () => {
 		}
 	});
 
+	test("non-streaming role recovery switches and resumes the failed turn", async () => {
+		await initRepo(repo);
+		fixture = await createPromptFixture(repo, root, {
+			responses: [
+				{
+					stopReason: "error",
+					errorMessage: "Error: 404 Not Found default model missing",
+				},
+				{ content: ["recovered"] },
+			],
+			roles: {
+				plan: "openai/gpt-4o-mini",
+				default: "anthropic/claude-haiku-4-5",
+				advisor: "anthropic/claude-sonnet-4-5",
+			},
+			enabledModels: [
+				"anthropic/claude-haiku-4-5",
+				"anthropic/claude-sonnet-4-5",
+				"openai/gpt-4o-mini",
+				"openai/gpt-4o",
+			],
+			retry: {
+				"retry.enabled": false,
+			},
+		});
+		fixture.session.setNikoflowState(executeState({ autonomous: true }), { persist: false });
+
+		await fixture.session.prompt("Recover default after terminal provider error");
+		await fixture.session.waitForIdle();
+
+		expect(modelSelector(fixture.session)).toBe("openai/gpt-4o");
+		expect(fixture.requestedModels).toEqual(["anthropic/claude-haiku-4-5", "openai/gpt-4o"]);
+		expect(fixture.mock?.calls).toHaveLength(2);
+	});
+
 	test("class-a transient failures hold instead of switching role models when retries are disabled", async () => {
 		await initRepo(repo);
 		fixture = await createPromptFixture(repo, root, {
