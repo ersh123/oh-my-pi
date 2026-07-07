@@ -8,6 +8,8 @@ putting a **binding review gate the coding model cannot approve for itself**.
 > One line: *a strong model plans and reviews, a cheap model writes, and the cheap model can
 > never sign off on its own work.*
 
+![How Nikoflow works — architect plans, cheap executor writes, independent reviewer gates](../assets/nikoflow/nikoflow-how-it-works.png)
+
 This document is the entry point. For depth see:
 `NIKOFLOW-STATUS.md` (as-built architecture) · `NIKOFLOW-ROADMAP.md` (design rationale + audit
 history) · `NIKOFLOW-IMPLEMENTATION.md` (build spec).
@@ -15,6 +17,8 @@ history) · `NIKOFLOW-IMPLEMENTATION.md` (build spec).
 ---
 
 ## The problem it solves
+
+![Without rails a cheap model drifts, skips edge cases, and praises its own bug; Nikoflow puts it on rails with a clear spec, tickets, and an independent gate](../assets/nikoflow/nikoflow-problem-solution.png)
 
 Cheap models are cheap for a reason: on a real task they drift off the spec, skip edge cases,
 declare success on broken code, and — worst of all — **grade their own homework**. Hand one a
@@ -120,6 +124,8 @@ code comment is ignored.
 
 ## Features
 
+![Nikoflow features: model picker, in-chat trigger, interview/brief triage, autonomous batch, non-self-approvable review, on-the-fly model recovery](../assets/nikoflow/nikoflow-features.png)
+
 - **Interactive model picker** — pick which model plays each role from your available models,
   with cost/context shown, or pass `--architect/--exec/--qa` to skip it.
 - **In-chat keyword** — `никофлоу <task>` / `nikoflow <task>` activates the mode from a running
@@ -136,6 +142,10 @@ code comment is ignored.
 ---
 
 ## Security model (anti-self-approval)
+
+<p align="center">
+  <img src="../assets/nikoflow/nikoflow-gate.png" width="560" alt="The binding gate: only an independent reviewer's key opens it; the coding model can't self-approve, doesn't know the gate id, and an empty diff never passes">
+</p>
 
 The property nikoflow guarantees: **the coding model cannot advance any gate without the
 required independent signal.** It has been hardened through a full code review and a 5-model

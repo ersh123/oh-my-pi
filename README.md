@@ -20,6 +20,10 @@
 
 ---
 
+<p align="center">
+  <img src="assets/nikoflow/nikoflow-how-it-works.png" alt="Nikoflow: a strong architect plans, a cheap executor writes, an independent reviewer gates — the cheap model can't approve its own work">
+</p>
+
 > ### 🧩 This fork adds **Nikoflow**
 > A phase-gated mode that lets **cheap models produce production-grade output** — a strong model
 > plans and reviews, a cheap model writes, and the cheap model can **never approve its own work**
