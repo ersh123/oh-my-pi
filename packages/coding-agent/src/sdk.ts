@@ -1552,6 +1552,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
+			getNikoflowState: () => session?.getNikoflowState(),
+			defineNikoflowTickets: tickets =>
+				session?.defineNikoflowTickets(tickets) ?? {
+					tickets: [],
+					errors: ["Nikoflow ticket capture is unavailable before session initialization"],
+				},
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,

@@ -79,6 +79,20 @@ import {
 	MCP_CONNECTION_STATUS_EVENT_CHANNEL,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
+import { assessContextThinness } from "../nikoflow/context-thinness";
+import {
+	type NikoflowRolePickerRequest,
+	type NikoflowRoleSelections,
+	promptNikoflowGrillingMode,
+	promptNikoflowModelRoles,
+	shouldPromptNikoflowModelRoles,
+} from "../nikoflow/role-picker";
+import {
+	NIKOFLOW_DEPTHS,
+	type NikoflowDepth,
+	type NikoflowGrillingMode,
+	nikoflowStateFromModeData,
+} from "../nikoflow/state";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -723,6 +737,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.session.setNikoflowRoleRecoveryPicker(request => this.#pickNikoflowRecoveryModel(request));
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -1996,6 +2011,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #clearTransientModeState(): Promise<void> {
+		if (this.session.getNikoflowState()) {
+			this.session.deactivateNikoflowMode({ persist: false });
+		}
+
 		if (this.planModeEnabled || this.planModePaused) {
 			if (this.#planModePreviousTools !== undefined) {
 				await this.session.setActiveToolsByName(this.#planModePreviousTools);
@@ -2065,6 +2084,20 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.session.goalRuntime.clearAccounting();
+		if (sessionContext.mode === "nikoflow") {
+			const restoredState = nikoflowStateFromModeData(sessionContext.modeData);
+			if (!restoredState) {
+				this.sessionManager.appendModeChange("none");
+				return;
+			}
+			await this.session.activateNikoflowMode(restoredState.depth, {
+				persist: false,
+				sendContext: false,
+				initialState: restoredState,
+				grillingMode: restoredState.grillingMode,
+			});
+			return;
+		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -2734,6 +2767,119 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (initialPrompt && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
 		}
+	}
+
+	async handleNikoflowCommand(rest?: string, options?: { source?: "keyword" | "command" }): Promise<void> {
+		try {
+			const text = (rest ?? "").trim();
+			if (this.planModeEnabled || this.planModePaused) {
+				this.showWarning("Exit plan mode first.");
+				return;
+			}
+			if (this.goalModeEnabled || this.goalModePaused) {
+				this.showWarning("Exit goal mode first.");
+				return;
+			}
+			if (this.session.getNikoflowState() && !text) {
+				this.session.deactivateNikoflowMode();
+				this.showStatus("Nikoflow disabled.");
+				return;
+			}
+
+			const parts = text.split(/\s+/).filter(Boolean);
+			let autonomous = false;
+			let grillingMode: NikoflowGrillingMode | null = null;
+			const filtered: string[] = [];
+			for (const part of parts) {
+				if (part === "--batch") {
+					autonomous = true;
+				} else if (part === "--interview") {
+					grillingMode = "interview";
+				} else if (part === "--brief") {
+					grillingMode = "brief";
+				} else {
+					filtered.push(part);
+				}
+			}
+			if (autonomous && grillingMode === "interview") {
+				throw new Error("Deep interview requires an interactive human; drop --interview or --batch.");
+			}
+			const [first = "", ...tail] = filtered;
+			const hasDepth = NIKOFLOW_DEPTHS.includes(first as NikoflowDepth);
+			const depth = hasDepth ? (first as NikoflowDepth) : "standard";
+			const promptText = hasDepth ? tail.join(" ").trim() : filtered.join(" ").trim();
+
+			await this.#promptNikoflowModelRoles(depth, autonomous);
+			const selectedGrillingMode =
+				autonomous || grillingMode ? null : await this.#promptNikoflowGrillingMode(promptText);
+			await this.session.activateNikoflowMode(depth, {
+				autonomous,
+				grillingMode: autonomous ? null : (grillingMode ?? selectedGrillingMode),
+				deferHumanGateMint: promptText.length > 0 && !autonomous,
+			});
+			this.showStatus(`Nikoflow enabled (${depth}${autonomous ? ", batch" : ""}).`);
+			if (promptText && this.onInputCallback) {
+				this.onInputCallback(this.startPendingSubmission({ text: promptText }));
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			const shellHint =
+				options?.source === "keyword"
+					? `\nRun \`${APP_NAME} nikoflow:<depth> "task"\` from the shell if mid-chat activation is unavailable.`
+					: "";
+			this.showError(`${message}${shellHint}`);
+		}
+	}
+
+	async #promptNikoflowGrillingMode(task: string): Promise<NikoflowGrillingMode | null> {
+		if (!process.stdin.isTTY || !process.stdout.isTTY) return null;
+		if (!assessContextThinness(this.sessionManager.getCwd(), task).thin) return null;
+		const mode = await promptNikoflowGrillingMode();
+		if (!mode) this.showStatus("Nikoflow grilling: default.");
+		return mode;
+	}
+
+	async #promptNikoflowModelRoles(depth: NikoflowDepth, autonomous: boolean): Promise<void> {
+		const args = {
+			nikoflowDepth: depth,
+			nikoflowBatch: autonomous,
+			print: false,
+			mode: undefined,
+			model: undefined,
+			plan: undefined,
+			nikoflowQa: undefined,
+		};
+		if (
+			!shouldPromptNikoflowModelRoles(args, {
+				interactive: true,
+				stdinIsTTY: process.stdin.isTTY,
+				stdoutIsTTY: process.stdout.isTTY,
+			})
+		) {
+			return;
+		}
+		const selections = await promptNikoflowModelRoles({
+			args,
+			settings: this.session.settings,
+			modelRegistry: this.session.modelRegistry,
+		});
+		this.#applyNikoflowRoleSelections(selections);
+	}
+
+	#applyNikoflowRoleSelections(selections: NikoflowRoleSelections): void {
+		const overrides: Record<string, string> = {};
+		if (selections.default) overrides.default = selections.default.selector;
+		if (selections.plan) overrides.plan = selections.plan.selector;
+		if (selections.advisor) overrides.advisor = selections.advisor.selector;
+		this.session.settings.overrideModelRoles(overrides);
+	}
+
+	async #pickNikoflowRecoveryModel(request: NikoflowRolePickerRequest): Promise<string | null> {
+		const choice = await this.showHookSelector(
+			request.title,
+			request.options.map(option => ({ label: option.label, description: option.description })),
+		);
+		return choice ?? null;
 	}
 
 	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {

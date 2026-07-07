@@ -58,7 +58,11 @@ const QuestionItem = arkType({
 });
 
 const askSchema = arkType({
-	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	"question?": arkType("string").describe("single question text"),
+	"options?": OptionItem.array().describe("available options for a single question"),
+	"multi?": arkType("boolean").describe("allow multiple selections for a single question"),
+	"recommended?": arkType("number").describe("recommended option index for a single question"),
+	"questions?": QuestionItem.array().describe("questions to ask"),
 });
 
 export type AskToolInput = typeof askSchema.infer;
@@ -76,6 +80,7 @@ export interface QuestionResult {
 }
 
 export interface AskToolDetails {
+	error?: string;
 	question?: string;
 	options?: string[];
 	multi?: boolean;
@@ -639,6 +644,46 @@ function formatQuestionResult(result: QuestionResult): string {
 	return `${result.id}: (cancelled)`;
 }
 
+const ASK_NO_QUESTION_RETRY_TEXT =
+	"ask failed: no question provided. Re-issue the ask tool call with either a non-empty `question` string, OR a `questions` array where every item has a non-empty `question` field.";
+
+function hasUsableQuestion(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function askNoQuestionResult(): AgentToolResult<AskToolDetails> {
+	return {
+		content: [{ type: "text", text: ASK_NO_QUESTION_RETRY_TEXT }],
+		details: { error: "No question provided" },
+		isError: true,
+	};
+}
+
+type NormalizedAskParams = AskParams & { questions: NonNullable<AskParams["questions"]> };
+
+function normalizeAskParams(params: AskParams): NormalizedAskParams | undefined {
+	if (
+		Array.isArray(params.questions) &&
+		params.questions.length > 0 &&
+		params.questions.every(q => hasUsableQuestion(q.question))
+	) {
+		return params as NormalizedAskParams;
+	}
+	if (!hasUsableQuestion(params.question)) return undefined;
+	return {
+		...params,
+		questions: [
+			{
+				id: "question",
+				question: params.question,
+				options: params.options ?? [],
+				...(params.multi === undefined ? {} : { multi: params.multi }),
+				...(params.recommended === undefined ? {} : { recommended: params.recommended }),
+			},
+		],
+	};
+}
+
 // =============================================================================
 // Tool Class
 // =============================================================================
@@ -747,6 +792,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			editor: (title, prefill, dialogOptions, editorOptions) =>
 				extensionUi.editor(title, prefill, dialogOptions, editorOptions),
 		};
+		const askParams = normalizeAskParams(params);
+		if (!askParams) return askNoQuestionResult();
 
 		// Determine timeout based on settings and plan mode
 		const planModeEnabled = this.session.getPlanModeState?.()?.enabled ?? false;
@@ -758,22 +805,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
 
-		if (params.questions.length === 0) {
-			return {
-				content: [{ type: "text" as const, text: "Error: questions must not be empty" }],
-				details: {},
-			};
-		}
-
 		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
 		// mode — it's the assistant addressing the user — gated only by speech.enabled
 		// (the vocalizer re-checks the setting and no-ops when disabled).
 		if (this.session.settings.get("speech.enabled")) {
-			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
+			vocalizer.speak(askParams.questions.map(q => q.question).join("\n"));
 		}
 
 		const askQuestion = async (
-			q: AskParams["questions"][number],
+			q: NormalizedAskParams["questions"][number],
 			options?: { previous?: QuestionResult; navigation?: NavigationControls },
 		) => {
 			const questionOptions = q.options.map(option => ({
@@ -804,8 +844,8 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			}
 		};
 
-		if (params.questions.length === 1) {
-			const [q] = params.questions;
+		if (askParams.questions.length === 1) {
+			const [q] = askParams.questions;
 			const { optionLabels, selectedOptions, customInput, cancelled, timedOut } = await askQuestion(q);
 
 			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) {
@@ -843,15 +883,15 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			return { content: [{ type: "text" as const, text: responseText }], details };
 		}
 
-		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
+		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: askParams.questions.length });
 		let questionIndex = 0;
-		while (questionIndex < params.questions.length) {
-			const q = params.questions[questionIndex]!;
+		while (questionIndex < askParams.questions.length) {
+			const q = askParams.questions[questionIndex]!;
 			const previous = resultsByIndex[questionIndex];
 			const navigation: NavigationControls = {
 				allowBack: questionIndex > 0,
 				allowForward: true,
-				progressText: `${questionIndex + 1}/${params.questions.length}`,
+				progressText: `${questionIndex + 1}/${askParams.questions.length}`,
 			};
 			const {
 				optionLabels,
@@ -887,7 +927,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		const results = resultsByIndex.map((result, index) => {
 			if (result) return result;
-			const q = params.questions[index]!;
+			const q = askParams.questions[index]!;
 			return {
 				id: q.id,
 				question: q.question,
@@ -1119,7 +1159,7 @@ export const askToolRenderer = {
 	},
 
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails },
+		result: { content: Array<{ type: string; text?: string }>; details?: AskToolDetails; isError?: boolean },
 		_options: RenderResultOptions,
 		uiTheme: Theme,
 	): Component {
@@ -1135,6 +1175,12 @@ export const askToolRenderer = {
 			const header = renderStatusLine({ icon: "warning", title: "Ask" }, uiTheme);
 			const body = fallback ? `\n${uiTheme.fg("dim", fallback)}` : "";
 			return new Text(`${header}${body}`, 0, 0);
+		}
+
+		if (result.isError || details.error) {
+			const txt = result.content[0];
+			const fallback = txt?.type === "text" && txt.text ? txt.text : undefined;
+			return new Text(formatErrorMessage(details.error ?? fallback, uiTheme), 0, 0);
 		}
 
 		// Multi-part results: one divider-labelled section per question.

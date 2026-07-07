@@ -19,6 +19,8 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { NikoflowState } from "../nikoflow/state";
+import type { NikoflowTicketDefinitionResult, NikoflowTicketInput } from "../nikoflow/tickets";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
@@ -56,6 +58,8 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { NikoflowDefineTicketsTool } from "./nikoflow-define-tickets";
+import { NikoflowGrillingConvergedTool } from "./nikoflow-grilling-converged";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
@@ -95,6 +99,8 @@ export * from "./memory-edit";
 export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
+export * from "./nikoflow-define-tickets";
+export * from "./nikoflow-grilling-converged";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
@@ -271,6 +277,10 @@ export interface ToolSession {
 	settings: Settings;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
+	/** Nikoflow mode state (if active) */
+	getNikoflowState?: () => NikoflowState | undefined;
+	/** Capture Nikoflow ticket definitions into mode state and durable todo state. */
+	defineNikoflowTickets?: (tickets: readonly NikoflowTicketInput[]) => NikoflowTicketDefinitionResult;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
 	/** Goal mode state (if active or paused) */
@@ -388,6 +398,8 @@ export const DEFAULT_ESSENTIAL_TOOL_NAMES: readonly string[] = [
 	"write",
 	"glob",
 	"eval",
+	"nikoflow_define_tickets",
+	"nikoflow_grilling_converged",
 ] as const;
 
 /**
@@ -462,6 +474,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	job: s => new JobTool(s),
 	irc: IrcTool.createIf,
 	todo: s => new TodoTool(s),
+	nikoflow_define_tickets: s => new NikoflowDefineTicketsTool(s),
+	nikoflow_grilling_converged: () => new NikoflowGrillingConvergedTool(),
 	web_search: s => new WebSearchTool(s),
 	search_tool_bm25: SearchToolBm25Tool.createIf,
 	write: s => new WriteTool(s),

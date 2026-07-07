@@ -1,0 +1,114 @@
+import { describe, expect, test } from "bun:test";
+import { parseArgs } from "../../cli/args";
+import { normalizeNikoflowCommandArgs } from "../../cli/nikoflow-command";
+import { rejectNikoflowInNonInteractiveMode } from "../../main";
+import { parseNikoflowKeywordInput, tryHandleNikoflowKeywordInput } from "../../modes/controllers/input-controller";
+
+describe("nikoflow CLI activation guard", () => {
+	test("rejects nikoflow in print or non-interactive mode", () => {
+		expect(() => rejectNikoflowInNonInteractiveMode("niko flow:standard do it")).toThrow(
+			"Nikoflow requires interactive mode",
+		);
+		expect(() => rejectNikoflowInNonInteractiveMode(undefined, "tactical")).toThrow(
+			"Nikoflow requires interactive mode",
+		);
+		expect(() => rejectNikoflowInNonInteractiveMode("plain prompt")).not.toThrow();
+	});
+
+	test("allows nikoflow in non-interactive batch mode", () => {
+		expect(() => rejectNikoflowInNonInteractiveMode("niko flow:standard do it", undefined, true)).not.toThrow();
+	});
+
+	test("parses the nikoflow batch flag into root args", () => {
+		expect(normalizeNikoflowCommandArgs(["--batch", "deep", "ship it"])).toEqual({
+			depth: "deep",
+			autonomous: true,
+			grillingMode: null,
+			argv: ["ship it"],
+		});
+
+		const parsed = parseArgs([
+			"--nikoflow-depth",
+			"standard",
+			"--nikoflow-batch",
+			"--nikoflow-grilling",
+			"brief",
+			"ship it",
+		]);
+		expect(parsed.nikoflowDepth).toBe("standard");
+		expect(parsed.nikoflowBatch).toBe(true);
+		expect(parsed.nikoflowGrilling).toBe("brief");
+		expect(parsed.messages).toEqual(["ship it"]);
+	});
+
+	test("rejects deep interview in batch mode", () => {
+		expect(() =>
+			rejectNikoflowInNonInteractiveMode("niko flow:standard do it", undefined, true, "interview"),
+		).toThrow("Deep interview requires an interactive human");
+		expect(() =>
+			rejectNikoflowInNonInteractiveMode("niko flow:standard do it", undefined, true, "brief"),
+		).not.toThrow();
+	});
+
+	test("parses first-token nikoflow keywords into command rest", () => {
+		expect(parseNikoflowKeywordInput("nikoflow:deep build Y")).toEqual({ rest: "deep build Y" });
+		expect(parseNikoflowKeywordInput("никофлоу:standard --batch Z")).toEqual({
+			rest: "standard --batch Z",
+		});
+		expect(parseNikoflowKeywordInput("nikoflow:wrong build Y")).toEqual({
+			error: "Invalid Nikoflow depth: wrong. Use tactical, standard, or deep.",
+		});
+		expect(parseNikoflowKeywordInput("please run nikoflow")).toBeUndefined();
+	});
+
+	test("consumes nikoflow keyword submissions before normal prompting", async () => {
+		const activations: string[] = [];
+		const handled = await tryHandleNikoflowKeywordInput(
+			"никофлоу разработай X",
+			{
+				handleNikoflowCommand: async rest => {
+					activations.push(rest ?? "");
+				},
+				showWarning: () => {
+					throw new Error("unexpected warning");
+				},
+			},
+			{ hasImages: false },
+		);
+
+		expect(handled).toBe(true);
+		expect(activations).toEqual(["разработай X"]);
+
+		const normalHandled = await tryHandleNikoflowKeywordInput(
+			"обычный запрос nikoflow",
+			{
+				handleNikoflowCommand: async rest => {
+					activations.push(rest ?? "");
+				},
+				showWarning: () => {
+					throw new Error("unexpected warning");
+				},
+			},
+			{ hasImages: false },
+		);
+		expect(normalHandled).toBe(false);
+		expect(activations).toEqual(["разработай X"]);
+	});
+
+	test("does not consume nikoflow keyword mentions while a flow is active", async () => {
+		const handled = await tryHandleNikoflowKeywordInput(
+			"nikoflow keep working from the current ticket",
+			{
+				handleNikoflowCommand: async () => {
+					throw new Error("must stay on the normal prompt path");
+				},
+				showWarning: () => {
+					throw new Error("unexpected warning");
+				},
+			},
+			{ hasImages: false, nikoflowActive: true },
+		);
+
+		expect(handled).toBe(false);
+	});
+});

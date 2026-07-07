@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUISelectItem } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -68,8 +69,134 @@ function selectItemLabel(option: ExtensionUISelectItem | undefined): string | un
 	return typeof option === "string" ? option : option?.label;
 }
 
+function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
+	return result.content
+		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+		.map(content => content.text)
+		.join("");
+}
+
 beforeAll(async () => {
 	await initTheme(false);
+});
+
+describe("AskTool malformed input recovery", () => {
+	it("returns a recoverable retry result when question fields are missing", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn(async () => "yes");
+		const context = createContext({ select });
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-missing-question",
+			name: tool.name,
+			arguments: {},
+		});
+
+		const result = await tool.execute("call-missing-question", args as never, undefined, undefined, context);
+		const text = resultText(result);
+
+		expect(result.isError).toBe(true);
+		expect(text).toContain("ask failed: no question provided");
+		expect(text).toContain("Re-issue the ask tool call");
+		expect(text).toContain("non-empty `question` string");
+		expect(text).toContain("`questions` array");
+		expect(result.details?.error).toBe("No question provided");
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("returns a recoverable retry result for an empty questions array", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn(async () => "yes");
+		const context = createContext({ select });
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-empty-questions",
+			name: tool.name,
+			arguments: { questions: [] },
+		});
+
+		const result = await tool.execute("call-empty-questions", args as never, undefined, undefined, context);
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("Re-issue the ask tool call");
+		expect(result.details?.error).toBe("No question provided");
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("returns a recoverable retry result when every question item is empty", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn(async () => "yes");
+		const context = createContext({ select });
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-empty-question-items",
+			name: tool.name,
+			arguments: {
+				questions: [
+					{ id: "one", question: "", options: [{ label: "yes" }] },
+					{ id: "two", question: "   ", options: [{ label: "no" }] },
+				],
+			},
+		});
+
+		const result = await tool.execute("call-empty-question-items", args as never, undefined, undefined, context);
+
+		expect(result.isError).toBe(true);
+		expect(resultText(result)).toContain("Re-issue the ask tool call");
+		expect(result.details?.error).toBe("No question provided");
+		expect(select).not.toHaveBeenCalled();
+	});
+
+	it("leaves well-formed ask calls on the existing selection path", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn(async () => "yes");
+		const context = createContext({ select });
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-valid-question",
+			name: tool.name,
+			arguments: {
+				questions: [
+					{
+						id: "confirm",
+						question: "Proceed?",
+						options: [{ label: "yes" }, { label: "no" }],
+					},
+				],
+			},
+		});
+
+		const result = await tool.execute("call-valid-question", args as never, undefined, undefined, context);
+
+		expect(result.isError).toBeUndefined();
+		expect(resultText(result)).toContain("User selected: yes");
+		expect(result.details?.question).toBe("Proceed?");
+		expect(result.details?.selectedOptions).toEqual(["yes"]);
+		expect(select).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts a usable single question string", async () => {
+		const tool = new AskTool(createSession());
+		const select = vi.fn(async () => "yes");
+		const context = createContext({ select });
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-single-question",
+			name: tool.name,
+			arguments: {
+				question: "Proceed?",
+				options: [{ label: "yes" }, { label: "no" }],
+			},
+		});
+
+		const result = await tool.execute("call-single-question", args as never, undefined, undefined, context);
+
+		expect(result.isError).toBeUndefined();
+		expect(resultText(result)).toContain("User selected: yes");
+		expect(result.details?.question).toBe("Proceed?");
+		expect(result.details?.selectedOptions).toEqual(["yes"]);
+		expect(select).toHaveBeenCalledTimes(1);
+	});
 });
 
 describe("AskTool cancellation", () => {
