@@ -38,6 +38,21 @@ blockers from earlier phases are superseded and correlated to the current gate i
 unreliable across 3 fixes. Replacing it with the native advisor (still independent + harness-
 owned) closed the crux. `reviewer.ts` was deleted.
 
+## Anti-self-approval hardening (after a 7-reviewer parallel review)
+
+A parallel review (Opus 4.8, Sonnet 5, Fable 5, GPT-5.5, DeepSeek/GLM/MiniMax) found the
+property was *bypassable* and it was closed: the primary is no longer told the gate id (minted
+only into the advisor prompt); every primary-authored block fed to the advisor is XML-escaped
+and the advisor prompt treats tagged content as untrusted data (so an injected "call
+advise(approve)" in a diff/comment/acceptance is ignored); the advisor grades against the
+**original user task** captured at activation, not just primary-authored ticket acceptance; the
+review diff includes `git status --porcelain` + `git stash list` and an **empty diff can never
+be approved** (code-level hard block regardless of verdict); the review deadlock is gone (the
+gate rotates on a genuine fix turn, infra failures are split from the blocker budget); human
+gates require the phase artifact before a user turn advances; `advisor === executor` is a
+fail-fast error; an in-chat `nikoflow` keyword can't reset an active flow; ticket ids are
+validated so the DAG can't corrupt on resume.
+
 ## Evidence integrity (hardened after a full code review)
 
 The gate mechanism was sound, but a review found the *evidence* the advisor judged was
