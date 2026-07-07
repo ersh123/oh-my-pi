@@ -18,6 +18,19 @@
   <a href="https://discord.gg/4NMW9cdXZa"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat&colorA=222222&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
+---
+
+> ### 🧩 This fork adds **Nikoflow**
+> A phase-gated mode that lets **cheap models produce production-grade output** — a strong model
+> plans and reviews, a cheap model writes, and the cheap model can **never approve its own work**
+> (a binding, independent review gate). Run it with `omp nikoflow:standard "task"` or just type
+> `nikoflow <task>` in a chat.
+>
+> **→ Read [`docs/NIKOFLOW.md`](docs/NIKOFLOW.md)** — what it is, how it works, how to use it.
+> (Depth: [`NIKOFLOW-STATUS.md`](docs/NIKOFLOW-STATUS.md) · [`NIKOFLOW-ROADMAP.md`](docs/NIKOFLOW-ROADMAP.md) · [`NIKOFLOW-IMPLEMENTATION.md`](docs/NIKOFLOW-IMPLEMENTATION.md))
+
+---
+
 <p align="center">
   Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
 </p>
