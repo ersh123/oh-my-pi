@@ -25,6 +25,9 @@ export const PHASE_ROLE: Record<NikoflowPhase, NikoflowRole> = {
 	verify: "advisor",
 } as const;
 
+export type NikoflowRoleOverrides = Partial<Record<NikoflowRole, string>>;
+export type NikoflowRoleSwitchCounts = Partial<Record<NikoflowRole, number>>;
+
 export interface NikoflowState {
 	depth: NikoflowDepth;
 	autonomous: boolean;
@@ -37,6 +40,9 @@ export interface NikoflowState {
 	phaseTurnStarted: boolean;
 	tickets: NikoflowTicket[];
 	activeTicketId: string | null;
+	roleOverrides: NikoflowRoleOverrides;
+	roleSwitchCounts: NikoflowRoleSwitchCounts;
+	deadSelectors: string[];
 }
 
 export interface NikoflowModeData {
@@ -48,12 +54,49 @@ export interface NikoflowModeData {
 	gateRequestId: string | null;
 	gateMintedAt: number | null;
 	batchGateAcceptedAt: number | null;
+	phaseTurnStarted: boolean;
+	tickets: NikoflowTicket[];
+	activeTicketId: string | null;
+	roleOverrides: NikoflowRoleOverrides;
+	roleSwitchCounts: NikoflowRoleSwitchCounts;
+	deadSelectors: string[];
 }
 
 function normalizeGrillingMode(value: unknown): NikoflowGrillingMode | null {
 	return typeof value === "string" && NIKOFLOW_GRILLING_MODES.includes(value as NikoflowGrillingMode)
 		? (value as NikoflowGrillingMode)
 		: null;
+}
+
+function normalizeRoleOverrides(value: unknown): NikoflowRoleOverrides {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const input = value as Record<string, unknown>;
+	const output: NikoflowRoleOverrides = {};
+	for (const role of ["plan", "default", "advisor"] satisfies NikoflowRole[]) {
+		const selector = input[role];
+		if (typeof selector === "string" && selector.trim()) output[role] = selector;
+	}
+	return output;
+}
+
+function normalizeRoleSwitchCounts(value: unknown): NikoflowRoleSwitchCounts {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const input = value as Record<string, unknown>;
+	const output: NikoflowRoleSwitchCounts = {};
+	for (const role of ["plan", "default", "advisor"] satisfies NikoflowRole[]) {
+		const count = input[role];
+		if (typeof count === "number" && Number.isInteger(count) && count > 0) output[role] = count;
+	}
+	return output;
+}
+
+function normalizeDeadSelectors(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((selector): selector is string => typeof selector === "string" && selector.trim().length > 0);
+}
+
+function normalizeTickets(value: unknown): NikoflowTicket[] {
+	return Array.isArray(value) ? cloneTickets(value as NikoflowTicket[]) : [];
 }
 
 export function createState(
@@ -72,6 +115,9 @@ export function createState(
 		phaseTurnStarted: false,
 		tickets: [],
 		activeTicketId: null,
+		roleOverrides: {},
+		roleSwitchCounts: {},
+		deadSelectors: [],
 	};
 }
 
@@ -85,6 +131,12 @@ export function nikoflowModeData(state: NikoflowState): NikoflowModeData {
 		gateRequestId: state.gateRequestId,
 		gateMintedAt: state.gateMintedAt,
 		batchGateAcceptedAt: state.batchGateAcceptedAt,
+		phaseTurnStarted: state.phaseTurnStarted,
+		tickets: cloneTickets(state.tickets),
+		activeTicketId: state.activeTicketId,
+		roleOverrides: { ...state.roleOverrides },
+		roleSwitchCounts: { ...state.roleSwitchCounts },
+		deadSelectors: [...state.deadSelectors],
 	};
 }
 
@@ -106,12 +158,19 @@ export function nikoflowStateFromModeData(
 	const gateRequestId = modeData.gateRequestId;
 	const gateMintedAt = modeData.gateMintedAt;
 	const batchGateAcceptedAt = modeData.batchGateAcceptedAt;
+	const activeTicketId = modeData.activeTicketId;
 	return {
 		...state,
 		phaseIndex,
 		gateRequestId: typeof gateRequestId === "string" && gateRequestId.length > 0 ? gateRequestId : null,
 		gateMintedAt: typeof gateMintedAt === "number" ? gateMintedAt : null,
 		batchGateAcceptedAt: typeof batchGateAcceptedAt === "number" ? batchGateAcceptedAt : null,
+		phaseTurnStarted: modeData.phaseTurnStarted === true,
+		tickets: normalizeTickets(modeData.tickets),
+		activeTicketId: typeof activeTicketId === "string" && activeTicketId.length > 0 ? activeTicketId : null,
+		roleOverrides: normalizeRoleOverrides(modeData.roleOverrides),
+		roleSwitchCounts: normalizeRoleSwitchCounts(modeData.roleSwitchCounts),
+		deadSelectors: normalizeDeadSelectors(modeData.deadSelectors),
 	};
 }
 

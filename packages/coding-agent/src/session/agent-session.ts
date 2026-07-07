@@ -102,6 +102,7 @@ import type {
 	ToolCall,
 	ToolChoice,
 	Usage,
+	UsageLimitMarkResult,
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -249,6 +250,7 @@ import {
 	installNikoflowAgentSessionMode,
 	type MinimalToolCallContext,
 	type NikoflowAdvisorReview,
+	type NikoflowPhaseEntryResult,
 	type NikoflowToolPolicy,
 	nikoflowTicketDagErrors,
 	type OnTurnEnd,
@@ -256,14 +258,17 @@ import {
 } from "../nikoflow/mode";
 import { getCurrentPhaseProtocol } from "../nikoflow/prompts";
 import { collectNikoflowReviewEvidence } from "../nikoflow/review-evidence";
-import { assertNikoflowRoleRails } from "../nikoflow/roles";
+import { buildRoleRecoveryPickerRequest, selectNikoflowModelRole } from "../nikoflow/role-picker";
+import { assertNikoflowRoleRails, classifyRoleRecovery, reassertNikoflowRoleRails } from "../nikoflow/roles";
 import {
 	createState,
 	currentPhase,
+	currentRole,
 	currentTicket,
 	isHumanGatePhase,
 	markPhaseTurnStarted,
 	type NikoflowDepth,
+	type NikoflowRole,
 	type NikoflowState,
 	nikoflowModeData,
 	rotateGateRequest,
@@ -1544,7 +1549,24 @@ type ScheduledAgentContinueOptions = {
 	onError?: () => void;
 };
 
+interface NikoflowRoleRecoveryRequest {
+	role: NikoflowRole;
+	failedModel: Model;
+	errorId: number;
+	errorMessage: string;
+	providerWide: boolean;
+	usageOutcome?: UsageLimitMarkResult;
+	advisorGateId?: string | null;
+	phaseIndex: number;
+	source: "terminal" | "phase-entry" | "advisor-review";
+}
+
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+const NIKOFLOW_ROLE_RECOVERY_INTERACTIVE_MAX_SWITCHES = 3;
+const NIKOFLOW_ROLE_RECOVERY_BATCH_MAX_SWITCHES = 2;
+const NIKOFLOW_ROLE_RECOVERY_DEBOUNCE_MS = 5 * 60 * 1000;
+const NIKOFLOW_ROLE_RECOVERY_MAX_WAIT_MS = 30 * 60 * 1000;
+const NIKOFLOW_ROLE_RECOVERY_FALLBACK_SUPPRESS_MS = 5 * 60 * 1000;
 
 type SessionTitleSource = "auto" | "user";
 type SessionNameTrigger = "replan";
@@ -1648,6 +1670,8 @@ export class AgentSession {
 	#nikoflowAdvisorReviewAttempts = new Map<string, number>();
 	#nikoflowAdvisorBlockerCycles = new Map<string, number>();
 	#nikoflowAdvisorReviewCapture?: NikoflowAdvisorReviewCapture;
+	#nikoflowRoleOverrides: Partial<Record<NikoflowRole, string>> = {};
+	#nikoflowRecoveryPromptedAt = new Map<string, number>();
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
@@ -1691,6 +1715,7 @@ export class AgentSession {
 	#retryResolve: (() => void) | undefined = undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined = undefined;
 	#pendingRecoveredRetryErrors: PendingRecoveredRetryError[] = [];
+	#pendingRetryUsageLimitOutcome: UsageLimitMarkResult | undefined = undefined;
 	// Todo completion reminder state
 	#todoReminderCount = 0;
 	/**
@@ -2420,7 +2445,10 @@ export class AgentSession {
 					continue;
 				}
 			} else {
-				const sel = resolveAdvisorRoleSelection(this.settings, this.#modelRegistry.getAvailable());
+				const override = this.#resolveNikoflowRoleOverride("advisor");
+				const sel = override?.model
+					? { model: override.model, thinkingLevel: override.thinkingLevel }
+					: resolveAdvisorRoleSelection(this.settings, this.#modelRegistry.getAvailable());
 				if (!sel) {
 					if (emitWarnings) {
 						logger.debug("advisor enabled but no model assigned to the 'advisor' role; advisor inactive", {
@@ -4036,6 +4064,10 @@ export class AgentSession {
 					await emitAgentEndNotification();
 					return;
 				}
+			}
+			if (await this.#maybeNikoflowRoleRecovery(msg)) {
+				await emitAgentEndNotification();
+				return;
 			}
 			// Classifier refusals are persisted-skipped above; also prune the trailing
 			// stub from active context so the next turn's prompt does not replay it.
@@ -6961,9 +6993,73 @@ export class AgentSession {
 		this.#nikoflowState = state;
 		if (!state) {
 			this.#lastNikoflowModeDataKey = undefined;
+			this.#nikoflowRoleOverrides = {};
 			return;
 		}
+		this.#nikoflowRoleOverrides = { ...state.roleOverrides };
 		if (options.persist !== false) this.#persistNikoflowModeState(state);
+	}
+
+	#isNikoflowRole(role: string | undefined): role is NikoflowRole {
+		return role === "plan" || role === "default" || role === "advisor";
+	}
+
+	#resolveNikoflowRoleOverride(role: string): ResolvedModelRoleValue | undefined {
+		if (!this.#nikoflowState || !this.#isNikoflowRole(role)) return undefined;
+		const selector = this.#nikoflowRoleOverrides[role];
+		if (!selector) return undefined;
+		const resolved = resolveModelOverride([selector], this.#modelRegistry, this.settings);
+		if (!resolved.model) return undefined;
+		return {
+			model: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			explicitThinkingLevel: resolved.explicitThinkingLevel,
+			warning: undefined,
+		};
+	}
+
+	#nikoflowRoleModelResolver(
+		role: NikoflowRole,
+		candidate?: { role: NikoflowRole; model: Model },
+	): {
+		provider: string;
+		model: string;
+	} | null {
+		if (candidate?.role === role) {
+			return { provider: candidate.model.provider, model: candidate.model.id };
+		}
+		const resolved = this.resolveRoleModelWithThinking(role).model;
+		return resolved ? { provider: resolved.provider, model: resolved.id } : null;
+	}
+
+	#assertNikoflowRoleRails(candidate?: { role: NikoflowRole; model: Model }): void {
+		assertNikoflowRoleRails(role => this.#nikoflowRoleModelResolver(role, candidate));
+	}
+
+	#deadNikoflowSelectorSet(state: NikoflowState): Set<string> {
+		return new Set(state.deadSelectors);
+	}
+
+	#recordDeadNikoflowSelectors(
+		state: NikoflowState,
+		failedModel: Model,
+		providerWide: boolean,
+		extraSelectors: readonly string[] = [],
+	): NikoflowState {
+		const dead = this.#deadNikoflowSelectorSet(state);
+		dead.add(formatModelStringWithRouting(failedModel));
+		for (const selector of extraSelectors) dead.add(selector);
+		if (providerWide) {
+			for (const model of this.getAvailableModels()) {
+				if (this.#sameProviderEndpoint(model, failedModel)) dead.add(formatModelStringWithRouting(model));
+			}
+		}
+		return { ...state, deadSelectors: [...dead] };
+	}
+
+	#sameProviderEndpoint(candidate: Model, failedModel: Model): boolean {
+		if (candidate.provider !== failedModel.provider) return false;
+		return failedModel.baseUrl ? candidate.baseUrl === failedModel.baseUrl : true;
 	}
 
 	#markNikoflowModelTurnCompleted(): void {
@@ -7022,7 +7118,14 @@ export class AgentSession {
 
 	defineNikoflowTickets(tickets: readonly NikoflowTicketInput[]): NikoflowTicketDefinitionResult {
 		const state = this.#nikoflowState;
-		if (!state) return { tickets: [], errors: ["Nikoflow mode is not active"] };
+		if (!state) {
+			return {
+				tickets: [],
+				errors: [
+					"Nikoflow mode is not active. Re-activate Nikoflow on this session, then call nikoflow_define_tickets again; the ticket DAG is not accepted or discarded.",
+				],
+			};
+		}
 		const phase = currentPhase(state);
 		if (phase !== "tickets") {
 			return {
@@ -7072,26 +7175,42 @@ export class AgentSession {
 		const nextPhase = currentPhase(next);
 		const defaultDeliverAs = nextPhase === "execute" ? "followUp" : "nextTurn";
 		const deliverAs = options.deliverAs === undefined ? defaultDeliverAs : options.deliverAs;
-		const result = await enterNikoflowPhase(
-			{
-				resolveRoleModelWithThinking: role => this.resolveRoleModelWithThinking(role),
-				applyRoleModel: entry => this.applyRoleModel(entry),
-				setState: state => this.setNikoflowState(state, { persist: options.persist }),
-				sendNikoflowContext: state =>
-					this.#sendNikoflowContextForState(state, deliverAs ? { deliverAs } : undefined),
-				requestAdvisorReview: state => this.#requestNikoflowAdvisorReview(state),
-			},
-			previous ? currentPhase(previous) : null,
-			nextPhase,
-			next,
-			{
-				nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
-				now: () => Date.now(),
-				mintGate: options.mintGate,
-				sendContext: options.sendContext,
-				requestAdvisorReview: options.requestAdvisorReview,
-			},
-		);
+		let result: NikoflowPhaseEntryResult;
+		try {
+			result = await enterNikoflowPhase(
+				{
+					resolveRoleModelWithThinking: role => this.resolveRoleModelWithThinking(role),
+					applyRoleModel: entry => this.applyRoleModel(entry),
+					setState: state => this.setNikoflowState(state, { persist: options.persist }),
+					sendNikoflowContext: state =>
+						this.#sendNikoflowContextForState(state, deliverAs ? { deliverAs } : undefined),
+					requestAdvisorReview: state => this.#requestNikoflowAdvisorReview(state),
+				},
+				previous ? currentPhase(previous) : null,
+				nextPhase,
+				next,
+				{
+					nextGateRequestId: () => this.#nextNikoflowGateRequestId(),
+					now: () => Date.now(),
+					mintGate: options.mintGate,
+					sendContext: options.sendContext,
+					requestAdvisorReview: options.requestAdvisorReview,
+				},
+			);
+		} catch (error) {
+			const role = currentRole(next);
+			const failedModel = role ? this.resolveRoleModelWithThinking(role).model : undefined;
+			if (
+				role &&
+				failedModel &&
+				(await this.#scheduleNikoflowRoleRecoveryFromError(role, failedModel, error, next, {
+					persist: options.persist,
+				}))
+			) {
+				return undefined;
+			}
+			throw error;
+		}
 		if (options.persistTickets !== false && result.state.tickets.length > 0) {
 			this.#persistNikoflowTicketDag(result.state.tickets);
 		}
@@ -7241,6 +7360,23 @@ export class AgentSession {
 		} catch (error) {
 			this.#rollbackNikoflowAdvisorReviewPrompt(advisor, messageSnapshot);
 			const message = error instanceof Error ? error.message : String(error);
+			const errorId = AIError.classify(error, advisor.model.api);
+			const decision = classifyRoleRecovery(errorId);
+			if (
+				decision.class !== "c" &&
+				(await this.#scheduleNikoflowRoleRecovery({
+					role: "advisor",
+					failedModel: advisor.model,
+					errorId,
+					errorMessage: message || "Unknown error",
+					providerWide: decision.providerWide,
+					phaseIndex: state.phaseIndex,
+					advisorGateId: gateId,
+					source: "advisor-review",
+				}))
+			) {
+				return undefined;
+			}
 			await this.#notifyNikoflowAdvisorReviewUnavailable(gateId, `advisor review failed: ${message}`);
 			return undefined;
 		} finally {
@@ -7680,7 +7816,10 @@ export class AgentSession {
 	}
 
 	resolveRoleModel(role: string): Model | undefined {
-		return this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model).model;
+		return (
+			this.#resolveNikoflowRoleOverride(role)?.model ??
+			this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model).model
+		);
 	}
 
 	/**
@@ -7689,7 +7828,10 @@ export class AgentSession {
 	 * from role configuration (e.g., "anthropic/claude-sonnet-4-5:xhigh").
 	 */
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
-		return this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model);
+		return (
+			this.#resolveNikoflowRoleOverride(role) ??
+			this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model)
+		);
 	}
 
 	async installNikoflowMode(
@@ -13788,6 +13930,320 @@ export class AgentSession {
 		return stopType === "refusal" || stopType === "sensitive";
 	}
 
+	#shouldPromptNikoflowRoleRecovery(state: NikoflowState): boolean {
+		return state.autonomous !== true && process.stdin.isTTY === true && process.stdout.isTTY === true;
+	}
+
+	#nikoflowRecoveryCountLimit(state: NikoflowState): number {
+		return state.autonomous
+			? NIKOFLOW_ROLE_RECOVERY_BATCH_MAX_SWITCHES
+			: NIKOFLOW_ROLE_RECOVERY_INTERACTIVE_MAX_SWITCHES;
+	}
+
+	#nikoflowRecoveryFailureText(errorId: number, errorMessage: string): string {
+		return `${AIError.stringify(errorId)} — ${errorMessage.slice(0, 160)}`;
+	}
+
+	async #queueNikoflowRoleRecoveryYield(request: NikoflowRoleRecoveryRequest): Promise<void> {
+		await this.sendCustomMessage(
+			{
+				customType: "nikoflow-role-recovery",
+				content: `Nikoflow ${request.role} model failed terminally: ${this.#nikoflowRecoveryFailureText(request.errorId, request.errorMessage)}. Recovery will pick a replacement after this turn yields; retry state and gate ids stay unchanged.`,
+				display: true,
+				attribution: "agent",
+				details: {
+					role: request.role,
+					failedModel: formatModelStringWithRouting(request.failedModel),
+					providerWide: request.providerWide,
+					phaseIndex: request.phaseIndex,
+					advisorGateId: request.advisorGateId ?? null,
+				},
+			},
+			{ deliverAs: "followUp" },
+		);
+	}
+
+	async #queueNikoflowRoleRecoveryEscalation(
+		request: NikoflowRoleRecoveryRequest,
+		reason: string,
+		customType = "nikoflow-role-recovery-needed",
+	): Promise<void> {
+		await this.sendCustomMessage(
+			{
+				customType,
+				content: `Nikoflow ${request.role} model recovery paused: ${reason}. Failed role: ${request.role}; error: ${this.#nikoflowRecoveryFailureText(request.errorId, request.errorMessage)}. Pick a replacement with /model for that role, then run retry.`,
+				display: true,
+				attribution: "agent",
+				details: {
+					role: request.role,
+					failedModel: formatModelStringWithRouting(request.failedModel),
+					errorId: request.errorId,
+					providerWide: request.providerWide,
+				},
+			},
+			{ deliverAs: "followUp" },
+		);
+	}
+
+	#nikoflowRecoveryDebounceKey(role: NikoflowRole, failedModel: Model): string {
+		return `${role}:${failedModel.provider}:${failedModel.baseUrl ?? ""}`;
+	}
+
+	#nikoflowRecoverySelectorSuppressed(model: Model): boolean {
+		const parsed = parseRetryFallbackSelector(formatModelStringWithRouting(model), this.#modelRegistry);
+		return parsed ? this.#isRetryFallbackSelectorSuppressed(parsed) : false;
+	}
+
+	#nikoflowRecoveryCandidates(role: NikoflowRole, failedModel: Model, providerWide: boolean): Model[] {
+		const failedSelector = formatModelStringWithRouting(failedModel);
+		const state = this.#nikoflowState;
+		const dead = state ? this.#deadNikoflowSelectorSet(state) : new Set<string>();
+		const candidates: Model[] = [];
+		for (const model of this.getAvailableModels()) {
+			const selector = formatModelStringWithRouting(model);
+			if (selector === failedSelector) continue;
+			if (providerWide && this.#sameProviderEndpoint(model, failedModel)) continue;
+			if (dead.has(selector)) continue;
+			if (this.#nikoflowRecoverySelectorSuppressed(model)) continue;
+			try {
+				this.#assertNikoflowRoleRails({ role, model });
+			} catch {
+				continue;
+			}
+			candidates.push(model);
+		}
+		return candidates;
+	}
+
+	#selectBatchNikoflowRecoveryModel(
+		role: NikoflowRole,
+		failedModel: Model,
+		candidates: readonly Model[],
+	): Model | undefined {
+		if (candidates.length === 0) return undefined;
+		const cost = (model: Model) => model.cost.input + model.cost.output;
+		if (role === "default") {
+			return [...candidates].sort((left, right) => cost(left) - cost(right))[0];
+		}
+		const failedCost = cost(failedModel);
+		const reasoning = candidates.filter(model => model.reasoning);
+		const sameOrStronger = reasoning.filter(model => cost(model) >= failedCost);
+		const pool = sameOrStronger.length > 0 ? sameOrStronger : reasoning.length > 0 ? reasoning : candidates;
+		return [...pool].sort((left, right) => cost(right) - cost(left))[0];
+	}
+
+	async #applyNikoflowRoleRecoverySwitch(request: NikoflowRoleRecoveryRequest, model: Model): Promise<boolean> {
+		const state = this.#nikoflowState;
+		if (!state) return false;
+		const selector = formatModelStringWithRouting(model);
+		const count = state.roleSwitchCounts[request.role] ?? 0;
+		const next = {
+			...state,
+			roleOverrides: { ...state.roleOverrides, [request.role]: selector },
+			roleSwitchCounts: { ...state.roleSwitchCounts, [request.role]: count + 1 },
+		};
+		this.setNikoflowState(next);
+		try {
+			await this.applyRoleModel({
+				role: request.role,
+				model,
+				thinkingLevel: undefined,
+				explicitThinkingLevel: false,
+			});
+			this.#assertNikoflowRoleRails();
+		} catch (error) {
+			this.setNikoflowState(state);
+			throw error;
+		}
+		if (request.role === "advisor" && request.source === "advisor-review") {
+			this.#stopAdvisorRuntime();
+			this.#buildAdvisorRuntime(true);
+		}
+		if (request.role === "advisor" && request.source === "advisor-review" && request.advisorGateId) {
+			const current = this.#nikoflowState;
+			if (current?.gateRequestId === request.advisorGateId) {
+				void this.#requestNikoflowAdvisorReview(current);
+				return true;
+			}
+		}
+		return this.retry();
+	}
+
+	async #runNikoflowRoleRecovery(request: NikoflowRoleRecoveryRequest): Promise<void> {
+		const state = this.#nikoflowState;
+		if (!state || state.phaseIndex !== request.phaseIndex) return;
+		const limit = this.#nikoflowRecoveryCountLimit(state);
+		const count = state.roleSwitchCounts[request.role] ?? 0;
+		if (count >= limit) {
+			await this.#queueNikoflowRoleRecoveryEscalation(
+				request,
+				`role switch limit reached (${count}/${limit})`,
+				"nikoflow-role-recovery-exhausted",
+			);
+			return;
+		}
+
+		const candidates = this.#nikoflowRecoveryCandidates(request.role, request.failedModel, request.providerWide);
+		if (candidates.length === 0) {
+			await this.#runNikoflowRoleRecoveryEmptySet(request, state);
+			return;
+		}
+
+		if (!this.#shouldPromptNikoflowRoleRecovery(state)) {
+			const picked = this.#selectBatchNikoflowRecoveryModel(request.role, request.failedModel, candidates);
+			if (!picked) {
+				await this.#runNikoflowRoleRecoveryEmptySet(request, state);
+				return;
+			}
+			await this.#applyNikoflowRoleRecoverySwitch(request, picked);
+			return;
+		}
+
+		const selected = await selectNikoflowModelRole(
+			buildRoleRecoveryPickerRequest(
+				request.role,
+				request.failedModel,
+				request.errorId,
+				request.errorMessage,
+				candidates,
+				this.settings,
+			),
+		);
+		if (!selected) {
+			await this.#queueNikoflowRoleRecoveryEscalation(request, "model picker was cancelled");
+			this.#nikoflowRecoveryPromptedAt.set(
+				this.#nikoflowRecoveryDebounceKey(request.role, request.failedModel),
+				Date.now(),
+			);
+			return;
+		}
+		const picked = candidates.find(model => formatModelStringWithRouting(model) === selected);
+		if (!picked) {
+			await this.#queueNikoflowRoleRecoveryEscalation(request, `picker returned unavailable model ${selected}`);
+			return;
+		}
+		await this.#applyNikoflowRoleRecoverySwitch(request, picked);
+	}
+
+	async #runNikoflowRoleRecoveryEmptySet(request: NikoflowRoleRecoveryRequest, state: NikoflowState): Promise<void> {
+		const waitMarker = `wait:${request.role}:${formatModelStringWithRouting(request.failedModel)}`;
+		if (
+			state.autonomous &&
+			request.usageOutcome?.retryAtMs !== undefined &&
+			!state.deadSelectors.includes(waitMarker)
+		) {
+			const waitMs = Math.min(
+				Math.max(0, request.usageOutcome.retryAtMs - Date.now()),
+				NIKOFLOW_ROLE_RECOVERY_MAX_WAIT_MS,
+			);
+			this.setNikoflowState({ ...state, deadSelectors: [...state.deadSelectors, waitMarker] });
+			if (waitMs > 0) {
+				await scheduler.wait(waitMs, { signal: this.#postPromptTasksAbortController.signal });
+			}
+			await this.retry();
+			return;
+		}
+		await this.#queueNikoflowRoleRecoveryEscalation(
+			request,
+			"no replacement model remains after failed/provider/rails/cooldown exclusions",
+			"nikoflow-role-recovery-exhausted",
+		);
+	}
+
+	async #scheduleNikoflowRefusalRecovery(message: AssistantMessage, role: NikoflowRole): Promise<boolean> {
+		if (role !== "default" && role !== "advisor") return false;
+		this.#removeAssistantMessageFromActiveContext(message);
+		const isAdvisor = role === "advisor";
+		await this.sendCustomMessage(
+			{
+				customType: isAdvisor ? "nikoflow-advisor-refusal" : "nikoflow-executor-refusal",
+				content: isAdvisor
+					? "Nikoflow advisor refusal is terminal for this gate. Escalate to the user; do not switch models or weaken the independent review gate."
+					: "Nikoflow executor refusal returned to Architect scope control. Rephrase or narrow the request, then continue; do not switch models for content refusal.",
+				display: true,
+				attribution: "agent",
+				details: {
+					role,
+					errorMessage: message.errorMessage,
+					stopType: message.stopDetails?.type,
+				},
+			},
+			{ deliverAs: "followUp" },
+		);
+		return true;
+	}
+
+	async #scheduleNikoflowRoleRecovery(request: NikoflowRoleRecoveryRequest): Promise<boolean> {
+		let state = this.#nikoflowState;
+		if (!state) return false;
+		const debounceKey = this.#nikoflowRecoveryDebounceKey(request.role, request.failedModel);
+		const promptedAt = this.#nikoflowRecoveryPromptedAt.get(debounceKey);
+		if (promptedAt !== undefined && Date.now() - promptedAt < NIKOFLOW_ROLE_RECOVERY_DEBOUNCE_MS) {
+			return true;
+		}
+		state = this.#recordDeadNikoflowSelectors(state, request.failedModel, request.providerWide);
+		this.setNikoflowState(state);
+		await this.#queueNikoflowRoleRecoveryYield(request);
+		const generation = this.#promptGeneration;
+		this.#schedulePostPromptTask(async () => this.#runNikoflowRoleRecovery(request), { generation });
+		return true;
+	}
+
+	async #scheduleNikoflowRoleRecoveryFromError(
+		role: NikoflowRole,
+		failedModel: Model,
+		error: unknown,
+		state: NikoflowState,
+		options: { persist?: boolean } = {},
+	): Promise<boolean> {
+		const message = error instanceof Error ? error.message : String(error);
+		const noAuthModelApply = message.startsWith("No API key for ");
+		const errorId = noAuthModelApply ? 404 : AIError.classify(error, failedModel.api);
+		const decision = classifyRoleRecovery(errorId);
+		if (decision.class === "c") return false;
+		this.setNikoflowState(state, { persist: options.persist });
+		return this.#scheduleNikoflowRoleRecovery({
+			role,
+			failedModel,
+			errorId,
+			errorMessage: message || "Unknown error",
+			providerWide: noAuthModelApply ? false : decision.providerWide,
+			phaseIndex: state.phaseIndex,
+			advisorGateId: state.gateRequestId,
+			source: "phase-entry",
+		});
+	}
+
+	async #maybeNikoflowRoleRecovery(message: AssistantMessage): Promise<boolean> {
+		const state = this.#nikoflowState;
+		if (!state || message.stopReason !== "error") return false;
+		const role = currentRole(state);
+		if (!role) return false;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (AIError.isContextOverflow(message, contextWindow)) return false;
+		if (this.#isClassifierRefusal(message)) {
+			return this.#scheduleNikoflowRefusalRecovery(message, role);
+		}
+		const errorId = this.#classifyRetryMessage(message);
+		const usageOutcome = this.#pendingRetryUsageLimitOutcome;
+		this.#pendingRetryUsageLimitOutcome = undefined;
+		const decision = classifyRoleRecovery(errorId, usageOutcome);
+		if (decision.class === "c") return false;
+		const failedModel = this.resolveRoleModelWithThinking(role).model ?? this.model;
+		if (!failedModel) return false;
+		return this.#scheduleNikoflowRoleRecovery({
+			role,
+			failedModel,
+			errorId,
+			errorMessage: message.errorMessage || "Unknown error",
+			providerWide: decision.providerWide,
+			usageOutcome,
+			phaseIndex: state.phaseIndex,
+			advisorGateId: state.gateRequestId,
+			source: "terminal",
+		});
+	}
+
 	#getRetryFallbackChains(): RetryFallbackChains {
 		const configuredChains = this.settings.get("retry.fallbackChains");
 		if (!configuredChains || typeof configuredChains !== "object") return {};
@@ -13992,6 +14448,19 @@ export class AgentSession {
 			const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
 			const candidate = resolved.model ?? this.#modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
+			if (this.#nikoflowState && this.#isNikoflowRole(role)) {
+				try {
+					reassertNikoflowRoleRails({ type: "retry_fallback_applied" }, candidateRole =>
+						this.#nikoflowRoleModelResolver(candidateRole, { role, model: candidate }),
+					);
+				} catch {
+					this.#modelRegistry.suppressSelector(
+						selector.raw,
+						Date.now() + NIKOFLOW_ROLE_RECOVERY_FALLBACK_SUPPRESS_MS,
+					);
+					continue;
+				}
+			}
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 			if (!apiKey) continue;
 			await this.#applyRetryFallbackCandidate(role, selector, currentSelector, options);
@@ -14168,6 +14637,10 @@ export class AgentSession {
 		// the model once and lets the base turn proceed.
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
 		const classifierRefusal = this.#isClassifierRefusal(message);
+		const initialErrorId = this.#classifyRetryMessage(message);
+		if (!AIError.is(initialErrorId, AIError.Flag.UsageLimit)) {
+			this.#pendingRetryUsageLimitOutcome = undefined;
+		}
 
 		const generation = this.#promptGeneration;
 		this.#retryAttempt++;
@@ -14195,7 +14668,7 @@ export class AgentSession {
 		}
 
 		const errorMessage = message.errorMessage || "Unknown error";
-		const id = this.#classifyRetryMessage(message);
+		const id = initialErrorId;
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
@@ -14222,6 +14695,7 @@ export class AgentSession {
 					modelId: this.model.id,
 				},
 			);
+			this.#pendingRetryUsageLimitOutcome = outcome;
 			if (outcome.switched) {
 				switchedCredential = true;
 				delayMs = 0;

@@ -1,3 +1,4 @@
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { NikoflowPhase, NikoflowRole } from "./state";
 import { PHASE_ROLE } from "./state";
 
@@ -12,6 +13,16 @@ export interface NikoflowResolvedRoles {
 	plan: string;
 	default: string | null;
 	advisor: string | null;
+}
+
+export interface NikoflowRoleRecoveryUsageOutcome {
+	switched: boolean;
+	retryAtMs?: number;
+}
+
+export interface NikoflowRoleRecoveryDecision {
+	class: "a" | "b" | "c";
+	providerWide: boolean;
 }
 
 export function roleForPhase(phase: NikoflowPhase): NikoflowRole {
@@ -59,4 +70,42 @@ export function reassertNikoflowRoleRails(
 	resolve: RoleModelResolver,
 ): NikoflowResolvedRoles | null {
 	return shouldReassertNikoflowRoleRails(event) ? assertNikoflowRoleRails(resolve) : null;
+}
+
+export function classifyRoleRecovery(
+	errorId: number,
+	usageOutcome?: NikoflowRoleRecoveryUsageOutcome,
+): NikoflowRoleRecoveryDecision {
+	if (errorId === 413 || AIError.is(errorId, AIError.Flag.ContextOverflow)) {
+		return { class: "c", providerWide: false };
+	}
+	if (
+		errorId === 401 ||
+		errorId === 403 ||
+		AIError.is(errorId, AIError.Flag.AuthFailed) ||
+		AIError.is(errorId, AIError.Flag.OAuthExpiry)
+	) {
+		return { class: "b", providerWide: true };
+	}
+	if (AIError.is(errorId, AIError.Flag.UsageLimit)) {
+		return {
+			class: "b",
+			providerWide: usageOutcome?.switched === false && usageOutcome.retryAtMs === undefined,
+		};
+	}
+	if (errorId === 404 || AIError.is(errorId, AIError.Flag.Grammar)) {
+		return { class: "b", providerWide: false };
+	}
+	if (
+		errorId === 429 ||
+		AIError.is(errorId, AIError.Flag.Transient) ||
+		AIError.is(errorId, AIError.Flag.Timeout) ||
+		AIError.is(errorId, AIError.Flag.ThinkingLoop) ||
+		AIError.is(errorId, AIError.Flag.MalformedFunctionCall) ||
+		AIError.is(errorId, AIError.Flag.StaleResponsesItem) ||
+		AIError.is(errorId, AIError.Flag.ProviderFinishError)
+	) {
+		return { class: "a", providerWide: false };
+	}
+	return { class: "c", providerWide: false };
 }

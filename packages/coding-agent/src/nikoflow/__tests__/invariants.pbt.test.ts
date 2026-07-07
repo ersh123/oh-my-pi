@@ -62,6 +62,9 @@ function stateWithGate(random: () => number, gateRequestId: string | null): Niko
 		phaseTurnStarted: Boolean(int(random, 2)),
 		tickets: [],
 		activeTicketId: null,
+		roleOverrides: {},
+		roleSwitchCounts: {},
+		deadSelectors: [],
 	};
 }
 

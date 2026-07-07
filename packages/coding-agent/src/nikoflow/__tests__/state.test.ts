@@ -169,4 +169,52 @@ describe("nikoflow state", () => {
 			["TSK-002", "review"],
 		]);
 	});
+
+	test("round-trips durable recovery and ticket state through mode data", () => {
+		const tickets: NikoflowTicket[] = [
+			{
+				id: "TSK-001",
+				acceptance: ["done works"],
+				blocked_by: [],
+				implementation_notes: "ship first",
+				status: "done",
+			},
+			{
+				id: "TSK-002",
+				acceptance: ["review works"],
+				blocked_by: ["TSK-001"],
+				implementation_notes: "ship second",
+				status: "review",
+			},
+		];
+		const state = {
+			...mintGateRequest(setTicketDag(markPhaseTurnStarted(createState("standard")), tickets), "gate-1", 321),
+			activeTicketId: "TSK-002",
+			roleOverrides: {
+				plan: "openai/gpt-5.5",
+				advisor: "anthropic/claude-sonnet-4-5",
+			},
+			roleSwitchCounts: {
+				plan: 2,
+				advisor: 1,
+			},
+			deadSelectors: ["openai/dead-model", "anthropic/dead-model"],
+		};
+
+		const restored = nikoflowStateFromModeData(nikoflowModeData(state));
+
+		expect(restored?.phaseTurnStarted).toBe(true);
+		expect(restored?.gateRequestId).toBe("gate-1");
+		expect(restored?.activeTicketId).toBe("TSK-002");
+		expect(restored?.tickets.map(ticket => [ticket.id, ticket.status])).toEqual([
+			["TSK-001", "done"],
+			["TSK-002", "review"],
+		]);
+		expect(restored?.roleOverrides).toEqual({
+			plan: "openai/gpt-5.5",
+			advisor: "anthropic/claude-sonnet-4-5",
+		});
+		expect(restored?.roleSwitchCounts).toEqual({ plan: 2, advisor: 1 });
+		expect(restored?.deadSelectors).toEqual(["openai/dead-model", "anthropic/dead-model"]);
+	});
 });

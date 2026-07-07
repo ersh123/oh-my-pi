@@ -11,6 +11,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { advancePhase, createState } from "@oh-my-pi/pi-coding-agent/nikoflow/state";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -217,6 +218,84 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+	});
+
+	it("skips Nikoflow fallback candidates that collapse executor onto advisor", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const planModel = getBundledModel("google", "gemini-1.5-flash");
+		const collidingFallback = getBundledModel("openai", "gpt-4o-mini");
+		const safeFallback = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !planModel || !collidingFallback || !safeFallback) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else if (model.provider === safeFallback.provider && model.id === safeFallback.id) {
+					mock.push({ content: ["Recovered without collapsing review rails"] });
+				} else {
+					throw new Error(
+						`Unexpected model requested during Nikoflow fallback rail test: ${model.provider}/${model.id}`,
+					);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [
+					`${collidingFallback.provider}/${collidingFallback.id}`,
+					`${safeFallback.provider}/${safeFallback.id}`,
+				],
+			},
+		});
+		settings.setModelRole("plan", `${planModel.provider}/${planModel.id}`);
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		settings.setModelRole("advisor", `${collidingFallback.provider}/${collidingFallback.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.setNikoflowState(advancePhase(createState("tactical")), { persist: false });
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Recover without breaking Nikoflow rails");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${safeFallback.provider}/${safeFallback.id}`,
+		]);
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${primaryModel.provider}/${primaryModel.id}`,
+				to: `${safeFallback.provider}/${safeFallback.id}`,
+				role: "default",
+			},
+		]);
+		expect(modelRegistry.isSelectorSuppressed(`${collidingFallback.provider}/${collidingFallback.id}`)).toBe(true);
 	});
 
 	it("falls back on structured classifier refusals and pins the fallback", async () => {

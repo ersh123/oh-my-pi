@@ -1,4 +1,5 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ProcessTerminal, TUI } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { Args } from "../cli/args";
@@ -17,6 +18,12 @@ const ROLE_PROMPTS: Record<NikoflowRole, string> = {
 	plan: "Architect — strong model that plans, grills, writes tickets (modelRoles.plan)",
 	default: "Executor — cheap model that writes code (modelRoles.default)",
 	advisor: "Reviewer/QA — strong model that gates + reviews (modelRoles.advisor)",
+};
+
+const ROLE_LABELS: Record<NikoflowRole, string> = {
+	plan: "Architect",
+	default: "Executor",
+	advisor: "Reviewer/QA",
 };
 
 const ROLE_ORDER: readonly NikoflowRole[] = ["plan", "default", "advisor"];
@@ -77,7 +84,7 @@ export function shouldPromptNikoflowModelRoles(
 	);
 }
 
-function formatModelDescription(model: Model<Api>): string {
+export function formatModelDescription(model: Model<Api>): string {
 	const parts = [model.name];
 	if (model.reasoning) parts.push("reasoning");
 	if (model.contextWindow) parts.push(`${formatNumber(model.contextWindow)} context`);
@@ -86,7 +93,7 @@ function formatModelDescription(model: Model<Api>): string {
 	return parts.filter(Boolean).join(" | ");
 }
 
-function toOptions(models: readonly Model<Api>[]): NikoflowRolePickerOption[] {
+export function toOptions(models: readonly Model<Api>[]): NikoflowRolePickerOption[] {
 	return models.map(model => {
 		const selector = formatModelStringWithRouting(model);
 		return {
@@ -114,7 +121,7 @@ function configuredRoleIndex(role: NikoflowRole, settings: Settings, models: rea
 	return models.findIndex(model => sameModel(resolved.model, model));
 }
 
-function defaultRoleIndex(role: NikoflowRole, settings: Settings, models: readonly Model<Api>[]): number {
+export function defaultRoleIndex(role: NikoflowRole, settings: Settings, models: readonly Model<Api>[]): number {
 	const configured = configuredRoleIndex(role, settings, models);
 	if (configured >= 0) return configured;
 	if (role === "default") {
@@ -132,6 +139,23 @@ function defaultRoleIndex(role: NikoflowRole, settings: Settings, models: readon
 	}
 	const reasoningIndex = models.findIndex(model => model.reasoning);
 	return Math.max(0, reasoningIndex);
+}
+
+export function buildRoleRecoveryPickerRequest(
+	role: NikoflowRole,
+	failedModel: Model<Api>,
+	errorId: number,
+	errorMessage: string,
+	models: readonly Model<Api>[],
+	settings?: Settings,
+): NikoflowRolePickerRequest {
+	const line = `${failedModel.provider}/${failedModel.id}: ${AIError.stringify(errorId)} — ${errorMessage.slice(0, 80)}`;
+	return {
+		role,
+		title: `${ROLE_LABELS[role]} model failed — pick a replacement\n${line}`,
+		options: toOptions(models),
+		initialIndex: settings ? defaultRoleIndex(role, settings, models) : 0,
+	};
 }
 
 function selectionBySelector(

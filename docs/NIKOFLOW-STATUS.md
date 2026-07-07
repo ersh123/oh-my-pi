@@ -25,6 +25,13 @@ per-ticket execute loop.
 Fail-fast at activation if `plan` == `default` or unset. Fully **model-agnostic** — no model
 names or provider branching anywhere in the nikoflow code; roles resolve through `modelRoles`.
 
+Role recovery is terminal-only: the normal retry/backoff/credential-rotation/fallback loop
+owns in-flight transient failures. If that machinery gives up, Nikoflow can replace only the
+current phase role's model, re-run the same role rails, persist the override in mode data, and
+resume via retry without touching gate ids, ticket DAG, or advisor verdict state. Interactive
+recovery yields first, then opens the picker from the follow-up/post-prompt queue; batch mode
+auto-picks within the same rails and exhausts boundedly.
+
 ## The binding gate — native advisor (the key design decision)
 
 The verify gate is satisfied **only** by an independent verdict from the **native oh-my-pi
@@ -78,12 +85,14 @@ advance on any user turn (no phase-regression keyword yet); ticket acceptance is
 - Callbacks are **chained**, never clobbered (the advisor's `onTurnEnd` survives); gate-hold
   is a **follow-up-queue yield** (not a blocking return); for human/exhausted gates it yields
   to the user rather than looping (livelock-free, bounded).
+- Retry fallback candidates are rechecked against Nikoflow rails before application, so a
+  generic fallback chain cannot collapse executor and reviewer onto the same model.
 
 ## Ticketization (standard/deep) — real per-ticket loop
 
 The architect decomposes the spec by calling a structured **`nikoflow_define_tickets`** tool
 (`{tickets:[{id,acceptance,blocked_by,implementation_notes}]}`) — validated into a DAG,
-persisted to the compaction-durable todo-state. Execute then **loops** over tickets in
+persisted to the compaction-durable todo-state and Nikoflow mode data. Execute then **loops** over tickets in
 topological order: per ticket the cheap executor implements against its acceptance, a fresh
 independent advisor review gates that ticket's diff (pass→done, blocker→fix, bounded→escalate),
 then the next ticket. A final verify reviews the whole.
@@ -110,12 +119,12 @@ acceptance) — the "hardened spec → cheap executor drifts → advisor catches
 ## Honest limitations
 
 - Verified live only on DeepSeek/GLM (code is model-agnostic; other subscriptions untested).
-- Interactive human gates need a real user; **autonomous batch mode** (advisor replaces the
-  human at gates) is the current in-progress addition.
+- Interactive human gates need a real user; autonomous batch mode is implemented but still
+  needs broader live dogfood across providers.
 - Not yet exercised at 15+ file scale.
 - The grilling convergence-marker is unit-tested; a live interactive dogfood of it is pending.
 
 ## Tests
 
-`bun test packages/coding-agent/src/nikoflow/__tests__/` — 64+ tests, incl. property-based
+`bun test packages/coding-agent/src/nikoflow/__tests__/` — 108 tests, incl. property-based
 anti-self-approval invariants, per-ticket loop, allowlist, convergence marker, advisor gate.
