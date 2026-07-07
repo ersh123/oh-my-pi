@@ -378,6 +378,78 @@ describe("AgentSession Nikoflow security gates", () => {
 		expect(fixture.session.getNikoflowState()?.gateRequestId).toBeNull();
 	});
 
+	test("advisor recovery during execute review preserves the executor model and updates advisor runtime", async () => {
+		await initRepo(repo, { dirty: true });
+		fixture = await createPromptFixture(repo, root, {
+			roles: {
+				plan: "openai/gpt-4o-mini",
+				default: "anthropic/claude-haiku-4-5",
+				advisor: "anthropic/claude-sonnet-4-5",
+			},
+			enabledModels: [
+				"anthropic/claude-haiku-4-5",
+				"anthropic/claude-sonnet-4-5",
+				"openai/gpt-4o-mini",
+				"openai/gpt-4o",
+			],
+			advisorEnabled: true,
+		});
+		const advisorModels: string[] = [];
+		vi.spyOn(Agent.prototype, "prompt").mockImplementation(async function (this: Agent, input) {
+			const promptText = typeof input === "string" ? input : JSON.stringify(input);
+			advisorModels.push(`${this.state.model.provider}/${this.state.model.id}`);
+			if (advisorModels.length === 1) {
+				throw new Error("Error: 404 Not Found advisor model missing");
+			}
+			const advise = this.state.tools.find((tool): tool is AgentTool => tool.name === "advise");
+			if (!advise) throw new Error("Expected advisor advise tool");
+			await advise.execute("advise-test", {
+				note: "clean",
+				severity: "nit",
+				gateId: gateIdFromPrompt(promptText),
+				verdict: "approve",
+			});
+		});
+		await fixture.session.installNikoflowMode({
+			isGateSatisfied: state => state.gateRequestId === null,
+		});
+		const ticket: NikoflowTicket = {
+			id: "T1",
+			acceptance: ["reviewed"],
+			blocked_by: [],
+			implementation_notes: "keep execute phase active",
+			status: "review",
+		};
+		let state = createState("standard", { originalTask: "review execute ticket" });
+		for (let i = 0; i < 4; i++) state = advancePhase(state);
+		fixture.session.setNikoflowState(
+			mintGateRequest(
+				markPhaseTurnStarted({
+					...state,
+					tickets: [ticket],
+					activeTicketId: "T1",
+				}),
+				"execute-gate",
+			),
+			{ persist: false },
+		);
+		const onBeforeYield = fixture.session.agent.getOnBeforeYield();
+		if (!onBeforeYield) throw new Error("Expected Nikoflow onBeforeYield");
+
+		await onBeforeYield();
+		await fixture.session.waitForIdle();
+
+		expect(advisorModels).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(fixture.session.getNikoflowState()?.phaseIndex).toBe(4);
+		expect(fixture.session.getNikoflowState()?.roleOverrides.advisor).toBe("openai/gpt-4o");
+		expect(modelSelector(fixture.session)).toBe("anthropic/claude-haiku-4-5");
+
+		await onBeforeYield();
+
+		expect(advisorModels[1]).toBe("openai/gpt-4o");
+		expect(advisorModels.slice(1).every(model => model === "openai/gpt-4o")).toBe(true);
+	});
+
 	test("nikoflow role refusals route to role recovery instead of retry model fallback", async () => {
 		await initRepo(repo);
 		fixture = await createPromptFixture(repo, root, {
@@ -467,6 +539,9 @@ describe("AgentSession Nikoflow security gates", () => {
 			expect(pickerCalls).toBeGreaterThan(0);
 			expect(modelSelector(fixture.session)).toBe("anthropic/claude-haiku-4-5");
 			expect(fixture.session.getNikoflowState()?.roleOverrides.advisor).toBeUndefined();
+			expect(lastCustomMessage(fixture.session, "nikoflow-role-recovery-exhausted").content).toContain(
+				"recovery failed after rollback",
+			);
 		} finally {
 			restoreTty();
 		}
@@ -669,6 +744,92 @@ describe("AgentSession Nikoflow security gates", () => {
 		expect(longWaits).toHaveLength(1);
 		expect(retrySpy).not.toHaveBeenCalled();
 		expect(fixture.session.getNikoflowState()?.phaseIndex).toBe(11);
+	});
+
+	test("empty-set usage wait escalates when retry cannot resume", async () => {
+		await initRepo(repo);
+		fixture = await createPromptFixture(repo, root, {
+			handler: () => ({
+				throw: "Error: 429 quota exceeded retry-after-ms=5000",
+			}),
+			roles: {
+				plan: "openai/gpt-4o-mini",
+				default: "anthropic/claude-haiku-4-5",
+				advisor: "anthropic/claude-sonnet-4-5",
+			},
+			enabledModels: ["anthropic/claude-haiku-4-5"],
+			retry: {
+				"retry.enabled": true,
+				"retry.maxRetries": 1,
+				"retry.baseDelayMs": 1,
+				"retry.maxDelayMs": 1,
+				"retry.modelFallback": false,
+			},
+		});
+		vi.spyOn(fixture.authStorage, "markUsageLimitReached").mockResolvedValue({
+			switched: false,
+			retryAtMs: Date.now() + 2000,
+		});
+		fixture.session.setNikoflowState(executeState({ autonomous: true }), { persist: false });
+		let retryCalls = 0;
+		let retryMockInstalled = false;
+		const originalWait = scheduler.wait.bind(scheduler);
+		vi.spyOn(scheduler, "wait").mockImplementation(async (waitMs, options) => {
+			if (waitMs < 1000) await originalWait(waitMs, options);
+			else if (!retryMockInstalled) {
+				retryMockInstalled = true;
+				vi.spyOn(fixture!.session, "retry").mockImplementation(async () => {
+					retryCalls += 1;
+					return false;
+				});
+			}
+		});
+
+		await fixture.session.prompt("Usage limit waits but cannot resume");
+		await fixture.session.waitForIdle();
+
+		expect(retryCalls).toBeGreaterThan(0);
+		expect(
+			customMessages(fixture.session, "nikoflow-role-recovery-exhausted").some(
+				entry => typeof entry.content === "string" && entry.content.includes("retry could not resume"),
+			),
+		).toBe(true);
+	});
+
+	test("plan role refusal emits a Nikoflow escalation instead of falling through silently", async () => {
+		await initRepo(repo);
+		fixture = await createPromptFixture(repo, root, {
+			handler: () => ({
+				stopReason: "error",
+				stopDetails: assistantRefusal(),
+				errorMessage: "classifier refusal",
+			}),
+			roles: {
+				plan: "openai/gpt-4o-mini",
+				default: "anthropic/claude-haiku-4-5",
+				advisor: "anthropic/claude-sonnet-4-5",
+			},
+			retry: {
+				"retry.enabled": true,
+				"retry.maxRetries": 1,
+				"retry.baseDelayMs": 1,
+				"retry.maxDelayMs": 1,
+				"retry.modelFallback": true,
+				"retry.fallbackChains": { plan: ["openai/gpt-4o"] },
+			},
+		});
+		await fixture.session.activateNikoflowMode("standard", {
+			initialState: createState("standard", { originalTask: "plan refusal" }),
+			persist: false,
+			sendContext: false,
+		});
+
+		await fixture.session.prompt("Trigger plan refusal");
+		await fixture.session.waitForIdle();
+
+		expect(fixture.events.some(event => event.type === "retry_fallback_applied")).toBe(false);
+		expect(modelSelector(fixture.session)).toBe("openai/gpt-4o-mini");
+		expect(lastCustomMessage(fixture.session, "nikoflow-plan-refusal").content).toContain("Rephrase");
 	});
 
 	test("FastModeUnsupported is a recoverable class-b role switch", async () => {

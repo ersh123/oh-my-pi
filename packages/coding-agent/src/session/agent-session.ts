@@ -1674,6 +1674,7 @@ export class AgentSession {
 	#nikoflowAdvisorReviewCapture?: NikoflowAdvisorReviewCapture;
 	#nikoflowRoleOverrides: Partial<Record<NikoflowRole, string>> = {};
 	#nikoflowRecoveryPromptedAt = new Map<string, number>();
+	#nikoflowRefusalRecoveryHandled = new WeakSet<AssistantMessage>();
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorEnabled = false;
@@ -3744,6 +3745,13 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			if (event.message.role === "assistant") {
+				this.#lastAssistantMessage = event.message;
+				const role = this.#nikoflowState ? currentRole(this.#nikoflowState) : null;
+				if (role === "plan" && this.#isClassifierRefusal(event.message)) {
+					await this.#scheduleNikoflowRefusalRecovery(event.message, role);
+				}
+			}
 			const persistMessageEnd = () => {
 				// Check if this is a hook/custom message
 				if (event.message.role === "hookMessage" || event.message.role === "custom") {
@@ -4061,6 +4069,10 @@ export class AgentSession {
 					await emitAgentEndNotification();
 					return;
 				}
+			}
+			if (this.#isNikoflowRoleClassifierRefusal(msg) && (await this.#maybeNikoflowRoleRecovery(msg))) {
+				await emitAgentEndNotification();
+				return;
 			}
 			if (this.#isRetryableError(msg)) {
 				const didRetry = await this.#handleRetryableError(msg);
@@ -14118,18 +14130,23 @@ export class AgentSession {
 			roleOverrides: { ...state.roleOverrides, [request.role]: selector },
 			roleSwitchCounts: { ...state.roleSwitchCounts, [request.role]: count + 1 },
 		};
+		const appliesLiveModel = request.role === currentRole(next);
 		this.setNikoflowState(next);
 		try {
-			await this.applyRoleModel({
-				role: request.role,
-				model,
-				thinkingLevel: undefined,
-				explicitThinkingLevel: false,
-			});
-			this.#assertNikoflowRoleRails();
+			if (appliesLiveModel) {
+				await this.applyRoleModel({
+					role: request.role,
+					model,
+					thinkingLevel: undefined,
+					explicitThinkingLevel: false,
+				});
+				this.#assertNikoflowRoleRails();
+			} else {
+				this.#assertNikoflowRoleRails({ role: request.role, model });
+			}
 		} catch (error) {
 			this.setNikoflowState(state);
-			if (previousModel) {
+			if (appliesLiveModel && previousModel) {
 				this.#setModelWithProviderSessionReset(previousModel);
 				this.setThinkingLevel(previousThinkingLevel);
 				await this.#syncAfterModelChange(previousEditMode);
@@ -14241,7 +14258,16 @@ export class AgentSession {
 				await scheduler.wait(waitMs, { signal: this.#postPromptTasksAbortController.signal });
 			}
 			if (!this.#isNikoflowRoleRecoveryRequestCurrent(request)) return;
-			await this.retry({ shouldContinue: () => this.#isNikoflowRoleRecoveryRequestCurrent(request) });
+			const didRetry = await this.retry({
+				shouldContinue: () => this.#isNikoflowRoleRecoveryRequestCurrent(request),
+			});
+			if (!didRetry) {
+				await this.#queueNikoflowRoleRecoveryEscalation(
+					request,
+					"retry could not resume after usage wait because the failed assistant turn is no longer current",
+					"nikoflow-role-recovery-exhausted",
+				);
+			}
 			return;
 		}
 		await this.#queueNikoflowRoleRecoveryEscalation(
@@ -14258,22 +14284,46 @@ export class AgentSession {
 	}
 
 	async #scheduleNikoflowRefusalRecovery(message: AssistantMessage, role: NikoflowRole): Promise<boolean> {
-		if (role !== "default" && role !== "advisor") return false;
+		if (this.#nikoflowRefusalRecoveryHandled.has(message)) return true;
+		this.#nikoflowRefusalRecoveryHandled.add(message);
 		this.#removeAssistantMessageFromActiveContext(message);
-		const isAdvisor = role === "advisor";
-		await this.sendCustomMessage(
-			{
-				customType: isAdvisor ? "nikoflow-advisor-refusal" : "nikoflow-executor-refusal",
-				content: isAdvisor
-					? "Nikoflow advisor refusal is terminal for this gate. Escalate to the user; do not switch models or weaken the independent review gate."
-					: "Nikoflow executor refusal returned to Architect scope control. Rephrase or narrow the request, then continue; do not switch models for content refusal.",
+		const customType =
+			role === "advisor"
+				? "nikoflow-advisor-refusal"
+				: role === "plan"
+					? "nikoflow-plan-refusal"
+					: "nikoflow-executor-refusal";
+		const content =
+			role === "advisor"
+				? "Nikoflow advisor refusal is terminal for this gate. Escalate to the user; do not switch models or weaken the independent review gate."
+				: role === "plan"
+					? "Nikoflow plan refusal stopped Architect planning. Rephrase or narrow the task, then continue; do not silently prune context or switch models for content refusal."
+					: "Nikoflow executor refusal returned to Architect scope control. Rephrase or narrow the request, then continue; do not switch models for content refusal.";
+		const details = {
+			role,
+			errorMessage: message.errorMessage,
+			stopType: message.stopDetails?.type,
+		};
+		if (role === "plan" && this.isStreaming) {
+			this.agent.appendMessage({
+				role: "custom",
+				customType,
+				content,
 				display: true,
 				attribution: "agent",
-				details: {
-					role,
-					errorMessage: message.errorMessage,
-					stopType: message.stopDetails?.type,
-				},
+				details,
+				timestamp: Date.now(),
+			});
+			this.sessionManager.appendCustomMessageEntry(customType, content, true, details, "agent");
+			return true;
+		}
+		await this.sendCustomMessage(
+			{
+				customType,
+				content,
+				display: true,
+				attribution: "agent",
+				details,
 			},
 			{ deliverAs: "followUp" },
 		);
@@ -14292,7 +14342,21 @@ export class AgentSession {
 		this.setNikoflowState(state);
 		await this.#queueNikoflowRoleRecoveryYield(request);
 		const generation = this.#promptGeneration;
-		this.#schedulePostPromptTask(async () => this.#runNikoflowRoleRecovery(request), { generation });
+		this.#schedulePostPromptTask(
+			async () => {
+				try {
+					await this.#runNikoflowRoleRecovery(request);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					await this.#queueNikoflowRoleRecoveryEscalation(
+						request,
+						`recovery failed after rollback: ${message || "Unknown error"}`,
+						"nikoflow-role-recovery-exhausted",
+					);
+				}
+			},
+			{ generation },
+		);
 		return true;
 	}
 
