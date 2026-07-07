@@ -81,6 +81,7 @@ import {
 } from "../mcp/startup-events";
 import { assessContextThinness } from "../nikoflow/context-thinness";
 import {
+	type NikoflowRolePickerRequest,
 	type NikoflowRoleSelections,
 	promptNikoflowGrillingMode,
 	promptNikoflowModelRoles,
@@ -736,6 +737,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
 		this.#observerRegistry = new SessionObserverRegistry();
+		this.session.setNikoflowRoleRecoveryPicker(request => this.#pickNikoflowRecoveryModel(request));
 	}
 
 	#handleMcpConnectionStatusEvent(event: McpConnectionStatusEvent): void {
@@ -2870,6 +2872,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (selections.plan) overrides.plan = selections.plan.selector;
 		if (selections.advisor) overrides.advisor = selections.advisor.selector;
 		this.session.settings.overrideModelRoles(overrides);
+	}
+
+	async #pickNikoflowRecoveryModel(request: NikoflowRolePickerRequest): Promise<string | null> {
+		const choice = await this.showHookSelector(
+			request.title,
+			request.options.map(option => ({ label: option.label, description: option.description })),
+		);
+		return choice ?? null;
 	}
 
 	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {

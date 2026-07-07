@@ -23,6 +23,10 @@ describe("nikoflow role recovery taxonomy", () => {
 			class: "b",
 			providerWide: false,
 		});
+		expect(classifyRoleRecovery(AIError.create(AIError.Flag.FastModeUnsupported))).toEqual({
+			class: "b",
+			providerWide: false,
+		});
 		expect(classifyRoleRecovery(AIError.create(AIError.Flag.AuthFailed))).toEqual({
 			class: "b",
 			providerWide: true,

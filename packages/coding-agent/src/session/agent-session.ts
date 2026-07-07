@@ -258,7 +258,7 @@ import {
 } from "../nikoflow/mode";
 import { getCurrentPhaseProtocol } from "../nikoflow/prompts";
 import { collectNikoflowReviewEvidence } from "../nikoflow/review-evidence";
-import { buildRoleRecoveryPickerRequest, selectNikoflowModelRole } from "../nikoflow/role-picker";
+import { buildRoleRecoveryPickerRequest, type NikoflowRolePicker } from "../nikoflow/role-picker";
 import { assertNikoflowRoleRails, classifyRoleRecovery, reassertNikoflowRoleRails } from "../nikoflow/roles";
 import {
 	createState,
@@ -875,6 +875,8 @@ export interface AgentSessionConfig {
 	 * cwd change via {@link AgentSession.setTitleSystemPrompt}.
 	 */
 	titleSystemPrompt?: string;
+	/** Existing-TUI picker for interactive Nikoflow role recovery. Omit in headless/SDK mode. */
+	nikoflowRoleRecoveryPicker?: NikoflowRolePicker;
 }
 
 /** Options for AgentSession.prompt() */
@@ -1684,6 +1686,7 @@ export class AgentSession {
 	#advisors: ActiveAdvisor[] = [];
 	/** Configured advisor roster from WATCHDOG.yml; undefined/empty → single legacy advisor. */
 	#advisorConfigs?: AdvisorConfig[];
+	#nikoflowRoleRecoveryPicker: NikoflowRolePicker | undefined;
 	/** Aggregate of the most recent stop's recorder closes; awaited by dispose() and
 	 *  used as the open barrier for the next build so two writers never share a file. */
 	#advisorRecorderClosed: Promise<void> = Promise.resolve();
@@ -2154,6 +2157,7 @@ export class AgentSession {
 		this.#advisorSharedInstructions = config.advisorSharedInstructions;
 		this.#advisorContextPrompt = config.advisorContextPrompt;
 		this.#advisorConfigs = config.advisorConfigs;
+		this.#nikoflowRoleRecoveryPicker = config.nikoflowRoleRecoveryPicker;
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
 		this.#validateRetryFallbackChains();
@@ -6981,6 +6985,10 @@ export class AgentSession {
 		return this.#nikoflowState;
 	}
 
+	setNikoflowRoleRecoveryPicker(picker: NikoflowRolePicker | undefined): void {
+		this.#nikoflowRoleRecoveryPicker = picker;
+	}
+
 	#persistNikoflowModeState(state: NikoflowState): void {
 		const modeData: Record<string, unknown> = { ...nikoflowModeData(state) };
 		const key = JSON.stringify(modeData);
@@ -7005,7 +7013,7 @@ export class AgentSession {
 	}
 
 	#resolveNikoflowRoleOverride(role: string): ResolvedModelRoleValue | undefined {
-		if (!this.#nikoflowState || !this.#isNikoflowRole(role)) return undefined;
+		if (!this.#isNikoflowRole(role)) return undefined;
 		const selector = this.#nikoflowRoleOverrides[role];
 		if (!selector) return undefined;
 		const resolved = resolveModelOverride([selector], this.#modelRegistry, this.settings);
@@ -7062,13 +7070,38 @@ export class AgentSession {
 		return failedModel.baseUrl ? candidate.baseUrl === failedModel.baseUrl : true;
 	}
 
-	#markNikoflowModelTurnCompleted(): void {
-		const state = this.#nikoflowState;
+	#markNikoflowModelTurnCompleted(messages: readonly AgentMessage[]): void {
+		let state = this.#nikoflowState;
 		if (!state) return;
+		const successfulAssistant = [...messages]
+			.reverse()
+			.find(
+				(message): message is AssistantMessage =>
+					message.role === "assistant" && message.stopReason !== "error" && !!message.provider,
+			);
+		if (successfulAssistant) {
+			this.#pendingRetryUsageLimitOutcome = undefined;
+			const deadSelectors = state.deadSelectors.filter(selector => {
+				const parsed = parseRetryFallbackSelector(
+					this.#nikoflowDeadSelectorModelSelector(selector),
+					this.#modelRegistry,
+				);
+				return !parsed || parsed.provider !== successfulAssistant.provider;
+			});
+			if (deadSelectors.length !== state.deadSelectors.length) {
+				state = { ...state, deadSelectors };
+				this.setNikoflowState(state);
+			}
+		}
 		const phase = currentPhase(state);
 		if (!phase || (phase === "grilling" && !state.autonomous)) return;
 		const next = markPhaseTurnStarted(state);
 		if (next !== state) this.setNikoflowState(next);
+	}
+
+	#nikoflowDeadSelectorModelSelector(selector: string): string {
+		const waitMarker = /^wait:(?:plan|default|advisor):(.+)$/.exec(selector);
+		return waitMarker?.[1] ?? selector;
 	}
 
 	#nextNikoflowGateRequestId(): string {
@@ -7363,7 +7396,7 @@ export class AgentSession {
 			const errorId = AIError.classify(error, advisor.model.api);
 			const decision = classifyRoleRecovery(errorId);
 			if (
-				decision.class !== "c" &&
+				decision.class === "b" &&
 				(await this.#scheduleNikoflowRoleRecovery({
 					role: "advisor",
 					failedModel: advisor.model,
@@ -7625,10 +7658,6 @@ export class AgentSession {
 		depth: NikoflowDepth,
 		options: AgentSessionNikoflowActivationOptions = {},
 	): Promise<void> {
-		assertNikoflowRoleRails(role => {
-			const model = this.resolveRoleModelWithThinking(role).model;
-			return model ? { provider: model.provider, model: model.id } : null;
-		});
 		this.#nikoflowAdvisorReviewAttempts.clear();
 		this.#nikoflowAdvisorBlockerCycles.clear();
 		this.#nikoflowCallbacks?.uninstall();
@@ -7645,6 +7674,13 @@ export class AgentSession {
 					grillingMode: options.autonomous ? null : options.grillingMode,
 					originalTask: this.#latestUserTask(),
 				});
+		if (options.initialState) {
+			this.#nikoflowRoleOverrides = { ...state.roleOverrides };
+		}
+		assertNikoflowRoleRails(role => {
+			const model = this.resolveRoleModelWithThinking(role).model;
+			return model ? { provider: model.provider, model: model.id } : null;
+		});
 		try {
 			this.#nikoflowCallbacks = await this.installNikoflowMode({
 				isGateSatisfied: current => current.gateRequestId === null,
@@ -7891,7 +7927,7 @@ export class AgentSession {
 						);
 					}),
 				advanceHumanGate: (messages, _signal, context) => {
-					session.#markNikoflowModelTurnCompleted();
+					session.#markNikoflowModelTurnCompleted(messages);
 					const gateMessages =
 						context && context.toolResults.length > 0 ? [...messages, ...context.toolResults] : messages;
 					return session.#advanceNikoflowHumanGate(gateMessages);
@@ -13911,6 +13947,7 @@ export class AgentSession {
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
 
+		if (this.#isNikoflowRoleClassifierRefusal(message)) return false;
 		if (this.#isClassifierRefusal(message)) return true;
 		return AIError.retriable(id, { replayUnsafe: this.#hasReplayUnsafeToolOutput(message) });
 	}
@@ -13930,8 +13967,20 @@ export class AgentSession {
 		return stopType === "refusal" || stopType === "sensitive";
 	}
 
+	#isNikoflowRoleClassifierRefusal(message: AssistantMessage): boolean {
+		if (!this.#isClassifierRefusal(message)) return false;
+		const state = this.#nikoflowState;
+		const role = state ? currentRole(state) : undefined;
+		return role !== null && this.#isNikoflowRole(role);
+	}
+
 	#shouldPromptNikoflowRoleRecovery(state: NikoflowState): boolean {
-		return state.autonomous !== true && process.stdin.isTTY === true && process.stdout.isTTY === true;
+		return (
+			state.autonomous !== true &&
+			this.#nikoflowRoleRecoveryPicker !== undefined &&
+			process.stdin.isTTY === true &&
+			process.stdout.isTTY === true
+		);
 	}
 
 	#nikoflowRecoveryCountLimit(state: NikoflowState): number {
@@ -13985,6 +14034,25 @@ export class AgentSession {
 		);
 	}
 
+	async #queueNikoflowRoleRecoveryHold(request: NikoflowRoleRecoveryRequest, reason: string): Promise<boolean> {
+		await this.sendCustomMessage(
+			{
+				customType: "nikoflow-role-recovery-held",
+				content: `Nikoflow ${request.role} model hit a transient failure: ${this.#nikoflowRecoveryFailureText(request.errorId, request.errorMessage)}. ${reason}. Retry/backoff owns this class; do not switch role models for a single transient failure.`,
+				display: true,
+				attribution: "agent",
+				details: {
+					role: request.role,
+					failedModel: formatModelStringWithRouting(request.failedModel),
+					errorId: request.errorId,
+					providerWide: request.providerWide,
+				},
+			},
+			{ deliverAs: "followUp" },
+		);
+		return true;
+	}
+
 	#nikoflowRecoveryDebounceKey(role: NikoflowRole, failedModel: Model): string {
 		return `${role}:${failedModel.provider}:${failedModel.baseUrl ?? ""}`;
 	}
@@ -14035,6 +14103,9 @@ export class AgentSession {
 	async #applyNikoflowRoleRecoverySwitch(request: NikoflowRoleRecoveryRequest, model: Model): Promise<boolean> {
 		const state = this.#nikoflowState;
 		if (!state) return false;
+		const previousModel = this.model;
+		const previousThinkingLevel = this.configuredThinkingLevel();
+		const previousEditMode = this.#resolveActiveEditMode();
 		const selector = formatModelStringWithRouting(model);
 		const count = state.roleSwitchCounts[request.role] ?? 0;
 		const next = {
@@ -14053,6 +14124,11 @@ export class AgentSession {
 			this.#assertNikoflowRoleRails();
 		} catch (error) {
 			this.setNikoflowState(state);
+			if (previousModel) {
+				this.#setModelWithProviderSessionReset(previousModel);
+				this.setThinkingLevel(previousThinkingLevel);
+				await this.#syncAfterModelChange(previousEditMode);
+			}
 			throw error;
 		}
 		if (request.role === "advisor" && request.source === "advisor-review") {
@@ -14062,7 +14138,6 @@ export class AgentSession {
 		if (request.role === "advisor" && request.source === "advisor-review" && request.advisorGateId) {
 			const current = this.#nikoflowState;
 			if (current?.gateRequestId === request.advisorGateId) {
-				void this.#requestNikoflowAdvisorReview(current);
 				return true;
 			}
 		}
@@ -14099,7 +14174,12 @@ export class AgentSession {
 			return;
 		}
 
-		const selected = await selectNikoflowModelRole(
+		const picker = this.#nikoflowRoleRecoveryPicker;
+		if (!picker) {
+			await this.#queueNikoflowRoleRecoveryEscalation(request, "interactive picker is not registered");
+			return;
+		}
+		const selected = await picker(
 			buildRoleRecoveryPickerRequest(
 				request.role,
 				request.failedModel,
@@ -14140,7 +14220,8 @@ export class AgentSession {
 			if (waitMs > 0) {
 				await scheduler.wait(waitMs, { signal: this.#postPromptTasksAbortController.signal });
 			}
-			await this.retry();
+			if (!this.#isNikoflowRoleRecoveryRequestCurrent(request)) return;
+			await this.retry({ shouldContinue: () => this.#isNikoflowRoleRecoveryRequestCurrent(request) });
 			return;
 		}
 		await this.#queueNikoflowRoleRecoveryEscalation(
@@ -14148,6 +14229,12 @@ export class AgentSession {
 			"no replacement model remains after failed/provider/rails/cooldown exclusions",
 			"nikoflow-role-recovery-exhausted",
 		);
+	}
+
+	#isNikoflowRoleRecoveryRequestCurrent(request: NikoflowRoleRecoveryRequest): boolean {
+		const current = this.#nikoflowState;
+		if (!current || current.phaseIndex !== request.phaseIndex) return false;
+		return !request.advisorGateId || current.gateRequestId === request.advisorGateId;
 	}
 
 	async #scheduleNikoflowRefusalRecovery(message: AssistantMessage, role: NikoflowRole): Promise<boolean> {
@@ -14200,14 +14287,14 @@ export class AgentSession {
 		const noAuthModelApply = message.startsWith("No API key for ");
 		const errorId = noAuthModelApply ? 404 : AIError.classify(error, failedModel.api);
 		const decision = classifyRoleRecovery(errorId);
-		if (decision.class === "c") return false;
+		if (decision.class !== "b") return false;
 		this.setNikoflowState(state, { persist: options.persist });
 		return this.#scheduleNikoflowRoleRecovery({
 			role,
 			failedModel,
 			errorId,
 			errorMessage: message || "Unknown error",
-			providerWide: noAuthModelApply ? false : decision.providerWide,
+			providerWide: noAuthModelApply ? true : decision.providerWide,
 			phaseIndex: state.phaseIndex,
 			advisorGateId: state.gateRequestId,
 			source: "phase-entry",
@@ -14228,10 +14315,9 @@ export class AgentSession {
 		const usageOutcome = this.#pendingRetryUsageLimitOutcome;
 		this.#pendingRetryUsageLimitOutcome = undefined;
 		const decision = classifyRoleRecovery(errorId, usageOutcome);
-		if (decision.class === "c") return false;
 		const failedModel = this.resolveRoleModelWithThinking(role).model ?? this.model;
 		if (!failedModel) return false;
-		return this.#scheduleNikoflowRoleRecovery({
+		const request = {
 			role,
 			failedModel,
 			errorId,
@@ -14240,7 +14326,14 @@ export class AgentSession {
 			usageOutcome,
 			phaseIndex: state.phaseIndex,
 			advisorGateId: state.gateRequestId,
-			source: "terminal",
+			source: "terminal" as const,
+		};
+		if (decision.class === "a") {
+			return this.#queueNikoflowRoleRecoveryHold(request, "Class-a failures stay with the retry loop");
+		}
+		if (decision.class === "c") return false;
+		return this.#scheduleNikoflowRoleRecovery({
+			...request,
 		});
 	}
 
@@ -14637,6 +14730,7 @@ export class AgentSession {
 		// the model once and lets the base turn proceed.
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
 		const classifierRefusal = this.#isClassifierRefusal(message);
+		const nikoflowRoleRefusal = this.#isNikoflowRoleClassifierRefusal(message);
 		const initialErrorId = this.#classifyRetryMessage(message);
 		if (!AIError.is(initialErrorId, AIError.Flag.UsageLimit)) {
 			this.#pendingRetryUsageLimitOutcome = undefined;
@@ -14731,7 +14825,7 @@ export class AgentSession {
 		const allowModelFallback = options?.allowModelFallback !== false;
 		const currentSelector = this.model ? formatRetryFallbackSelector(this.model, this.thinkingLevel) : undefined;
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
-			if (allowModelFallback && retrySettings.modelFallback) {
+			if (allowModelFallback && retrySettings.modelFallback && !nikoflowRoleRefusal) {
 				if (!classifierRefusal) {
 					this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
@@ -14917,8 +15011,9 @@ export class AgentSession {
 	 * Removes the error message from agent state and re-attempts with a fresh retry budget.
 	 * @returns true if retry was initiated, false if no failed turn to retry or agent is busy
 	 */
-	async retry(): Promise<boolean> {
+	async retry(options?: { shouldContinue?: () => boolean }): Promise<boolean> {
 		if (this.isStreaming || this.isCompacting || this.isRetrying) return false;
+		if (options?.shouldContinue && !options.shouldContinue()) return false;
 
 		const messages = this.agent.state.messages;
 		const lastMsg = messages[messages.length - 1];
@@ -14934,7 +15029,7 @@ export class AgentSession {
 		this.#retryAttempt = 0;
 
 		// Re-attempt the turn
-		this.#scheduleAgentContinue({ delayMs: 1 });
+		this.#scheduleAgentContinue({ delayMs: 1, shouldContinue: options?.shouldContinue });
 
 		return true;
 	}

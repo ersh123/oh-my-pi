@@ -51,6 +51,9 @@ export function assertNikoflowRoleRails(resolve: RoleModelResolver): NikoflowRes
 	if (!advisor) {
 		throw new Error("Nikoflow requires modelRoles.advisor to resolve. Pass --qa or configure modelRoles.advisor.");
 	}
+	if (advisor === plan) {
+		throw new Error("Nikoflow requires modelRoles.advisor to differ from modelRoles.plan.");
+	}
 	if (defaultRole && advisor === defaultRole) {
 		throw new Error(
 			"Nikoflow requires the QA/advisor model to differ from the executor (default) model for an independent review.",
@@ -93,7 +96,11 @@ export function classifyRoleRecovery(
 			providerWide: usageOutcome?.switched === false && usageOutcome.retryAtMs === undefined,
 		};
 	}
-	if (errorId === 404 || AIError.is(errorId, AIError.Flag.Grammar)) {
+	if (
+		errorId === 404 ||
+		AIError.is(errorId, AIError.Flag.Grammar) ||
+		AIError.is(errorId, AIError.Flag.FastModeUnsupported)
+	) {
 		return { class: "b", providerWide: false };
 	}
 	if (

@@ -45,6 +45,12 @@ describe("nikoflow roles", () => {
 		);
 	});
 
+	test("fails fast when advisor resolves to the plan model", () => {
+		expect(() => assertNikoflowRoleRails(role => (role === "default" ? "cheap" : "strong"))).toThrow(
+			"Nikoflow requires modelRoles.advisor to differ from modelRoles.plan.",
+		);
+	});
+
 	test("reasserts only on retry fallback events", () => {
 		const resolve: RoleModelResolver = role => (role === "plan" ? "strong" : role === "advisor" ? "qa" : "cheap");
 		expect(shouldReassertNikoflowRoleRails("retry_fallback_applied")).toBe(true);
