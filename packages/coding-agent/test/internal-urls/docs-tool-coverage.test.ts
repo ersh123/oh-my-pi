@@ -19,8 +19,12 @@ const expectedDocPaths = (name: string): string[] => [
 // these custom tools are not present there, so the coverage list is explicit.
 const CUSTOM_TOOL_NAMES = ["generate_image", "tts"] as const;
 
+// Native mode protocol tools are injected as internal control surfaces, not
+// general-purpose model tools, and intentionally have no omp:// root docs.
+const DOCUMENTED_BUILTIN_TOOL_NAMES = BUILTIN_TOOL_NAMES.filter(name => !name.startsWith("nikoflow_"));
+
 describe("omp:// root docs coverage", () => {
-	it.each([...BUILTIN_TOOL_NAMES])("documents builtin tool %s", name => {
+	it.each([...DOCUMENTED_BUILTIN_TOOL_NAMES])("documents builtin tool %s", name => {
 		const candidates = expectedDocPaths(name);
 		const present = candidates.find(candidate => fs.existsSync(candidate));
 		expect(

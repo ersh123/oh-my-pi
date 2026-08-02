@@ -176,9 +176,13 @@ export type StatusLineSegmentId =
 	| "cache_read"
 	| "cache_write"
 	| "cache_hit"
+	| "cache_hit_model"
+	| "reprocessed"
 	| "session_name"
 	| "usage"
-	| "collab";
+	| "collab"
+	| "cache_saved"
+	| "provider_balance";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -650,7 +654,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.separator": {
 		type: "enum",
-		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
+		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii", "mission-control"] as const,
 		default: "powerline-thin",
 		ui: {
 			tab: "appearance",
@@ -665,6 +669,7 @@ export const SETTINGS_SCHEMA = {
 				{ value: "block", label: "Block", description: "Solid blocks" },
 				{ value: "none", label: "None", description: "Space only" },
 				{ value: "ascii", label: "ASCII", description: "Greater-than signs" },
+				{ value: "mission-control", label: "Mission Control", description: "Framed status line with a Nikoflow operations row" },
 			],
 		},
 	},
@@ -700,6 +705,16 @@ export const SETTINGS_SCHEMA = {
 			label: "Compact Thinking Level",
 			description:
 				"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
+		},
+	},
+	"statusLine.showLabels": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Show Labels",
+			description: "Prepend a short uppercase label before each status bar segment.",
 		},
 	},
 	"tools.artifactSpillThreshold": {

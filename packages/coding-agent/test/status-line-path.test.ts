@@ -48,6 +48,7 @@ function createPathContext(): SegmentContext {
 			cost: 0,
 			tokensPerSecond: null,
 		},
+		perModelUsage: null,
 		contextPercent: 0,
 		contextTokens: 0,
 		contextWindow: 0,
@@ -62,6 +63,7 @@ function createPathContext(): SegmentContext {
 			pr: null,
 		},
 		usage: null,
+		balance: null,
 	};
 }
 

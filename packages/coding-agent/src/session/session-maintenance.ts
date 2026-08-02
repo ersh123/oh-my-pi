@@ -19,6 +19,7 @@ import {
 	type CompactionResult,
 	type CompactionSettings,
 	calculateContextTokens,
+	classifyCompactionPhase,
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
@@ -29,6 +30,8 @@ import {
 	NativeCompactionError,
 	prepareCompaction,
 	resolveBudgetReserveTokens,
+	resolveIdleFlushMs,
+	resolveProviderCacheProfile,
 	resolveThresholdTokens,
 	type ShakeConfig,
 	type ShakeRegion,
@@ -141,14 +144,6 @@ export function createCodexCompactionContext(options: {
  * stale/age victims are left to compaction/shake, which rebuild the cache anyway.
  */
 const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
-
-/**
- * Idle gap after which the supersede pass may flush the whole sent region (the
- * provider cache is cold, so re-writing it is free). MUST exceed the maximum
- * Anthropic prompt-cache TTL — "long" retention (the OAuth default) is 1h — or a
- * still-warm prefix is busted by the flush. 90 min leaves margin over the 1h TTL.
- */
-const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
 
 /**
  * Hysteresis band for the post-maintenance "did we actually create headroom?"
@@ -283,6 +278,7 @@ export class SessionMaintenance {
 	 */
 	#midTurnDeadEndPendingPrePrompt = false;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	#softCompactNoticed = false;
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -373,9 +369,11 @@ export class SessionMaintenance {
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
 				// Never re-write summarized-away entries; only flush the whole sent
-				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
+				// region once the cache is genuinely cold. The idle threshold adapts
+				// to the provider's actual cache TTL (Anthropic 1h → 70min, OpenAI
+				// ~10min → 20min) instead of the old hardcoded 90min.
 				keepBoundaryId,
-				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+				idleFlushMs: resolveIdleFlushMs(this.#model),
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -1336,7 +1334,9 @@ export class SessionMaintenance {
 			storedContextTokens,
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const cacheProfile = resolveProviderCacheProfile(this.#model);
+		const graduatedPhase = classifyCompactionPhase(contextTokens, contextWindow, compactionSettings, cacheProfile);
+		const shouldThresholdCompact = graduatedPhase === "compact" || graduatedPhase === "force";
 		logger.debug("Auto-compaction threshold decision", {
 			phase: "post-agent-end",
 			goalModeEnabled: this.#goalModeState?.enabled === true,
@@ -1351,10 +1351,69 @@ export class SessionMaintenance {
 			resolvedContextTokens: contextTokens,
 			postMaintenanceContextTokens,
 			maintenanceTokensFreed,
+			graduatedPhase,
 			shouldCompact: shouldThresholdCompact,
 			contextPromotionEnabled: this.#host.settings.get("contextPromotion.enabled") === true,
 		});
-		if (shouldThresholdCompact) {
+
+		// Graduated compaction (ported from Reasonix cache-first discipline).
+		// CONSUMPTION INVARIANT (do not regress): the soft and snip branches each
+		// `return COMPACTION_CHECK_NONE` from INSIDE their own block, so they can
+		// never fall through into the compact/force branch below — a soft or snip
+		// phase therefore NEVER calls runAutoCompaction and never rewrites the
+		// provider prompt-cache prefix. Only compact/force reach runAutoCompaction.
+		// If you ever add work to soft/snip, keep the early return: dropping it
+		// would let a "prefix preserved" phase silently trigger a cache-cratering
+		// compaction, which is the exact failure this discipline exists to prevent.
+		//
+		// Shared-flag semantics (intentional, open question — do not "fix"
+		// blindly): soft and snip share #softCompactNoticed, so on a monotonic
+		// climb the soft notice sets the flag and the later snip notice
+		// ("cold tool results eligible for pruning") is suppressed — one
+		// "prefix still intact" notice per escalation, reset to false when
+		// compact/force fires (so a fresh escalation can notice again). This
+		// reads as deliberate anti-spam; if a product decision ever wants the
+		// snip notice to fire independently, split the flag here — but treat
+		// that as a behavior change, not a bug fix.
+		//
+		// Lifecycle gap (known cosmetic boundary — do NOT silently "fix" by
+		// touching AgentSession lifecycle): #softCompactNoticed is reset only
+		// here (on compact/force) and at field init; SessionMaintenance is
+		// constructed ONCE per AgentSession (its constructor) and is NOT
+		// recreated by newSession / switchSession / rewind / fork. So if a soft
+		// notice fired in session A and then `/new` starts session B whose
+		// context again lands in soft/snip, the info notice stays suppressed
+		// until the first compact/force. This affects ONLY the cosmetic
+		// "prefix preserved" info banner — NOT compaction behavior (compact/
+		// force ignore the flag), NOT cache_hit%, NOT the PrefixShape miss
+		// marker — so it is not a cache-correctness bug. Fixing it properly
+		// means resetting the flag on every session transition in AgentSession
+		// (4+ sites), which is outside the cache-port scope; recorded as an
+		// open cosmetic question instead of a silent cross-cutting edit.
+		if (graduatedPhase === "soft") {
+			if (!this.#softCompactNoticed && cacheProfile.mode !== "none") {
+				this.#softCompactNoticed = true;
+				this.#host.emitNotice(
+					"info",
+					`Context at ${Math.round((contextTokens / contextWindow) * 100)}% — prefix preserved, cache intact.`,
+					"graduated-compact",
+				);
+			}
+			return COMPACTION_CHECK_NONE;
+		}
+		if (graduatedPhase === "snip") {
+			if (!this.#softCompactNoticed && cacheProfile.mode !== "none") {
+				this.#softCompactNoticed = true;
+				this.#host.emitNotice(
+					"info",
+					`Context at ${Math.round((contextTokens / contextWindow) * 100)}% — cold tool results eligible for pruning. Prefix still preserved.`,
+					"graduated-compact",
+				);
+			}
+			return COMPACTION_CHECK_NONE;
+		}
+		if (graduatedPhase === "compact" || graduatedPhase === "force") {
+			this.#softCompactNoticed = false;
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {

@@ -62,6 +62,7 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 			cost: 0,
 			tokensPerSecond: null,
 		},
+		perModelUsage: null,
 		contextPercent: 0,
 		contextTokens: 0,
 		contextWindow: 0,
@@ -76,6 +77,7 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 			pr: null,
 		},
 		usage: null,
+		balance: null,
 	};
 }
 

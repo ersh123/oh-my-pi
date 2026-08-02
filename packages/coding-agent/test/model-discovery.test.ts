@@ -24,6 +24,7 @@ describe("ModelRegistry runtime discovery", () => {
 	let originalOllamaBaseUrl: string | undefined;
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
+	let originalLlamaCppBaseUrl: string | undefined;
 	let originalAnthropicApiKey: string | undefined;
 
 	beforeEach(async () => {
@@ -31,10 +32,12 @@ describe("ModelRegistry runtime discovery", () => {
 		originalOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		originalOllamaHost = Bun.env.OLLAMA_HOST;
 		originalOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
 		originalAnthropicApiKey = Bun.env.ANTHROPIC_API_KEY;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env.LLAMA_CPP_BASE_URL;
 		delete Bun.env.ANTHROPIC_API_KEY;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
@@ -62,6 +65,11 @@ describe("ModelRegistry runtime discovery", () => {
 			delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		} else {
 			Bun.env.OLLAMA_CONTEXT_LENGTH = originalOllamaContextLength;
+		}
+		if (originalLlamaCppBaseUrl === undefined) {
+			delete Bun.env.LLAMA_CPP_BASE_URL;
+		} else {
+			Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
 		}
 		if (originalAnthropicApiKey === undefined) {
 			delete Bun.env.ANTHROPIC_API_KEY;

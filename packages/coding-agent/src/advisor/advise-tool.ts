@@ -15,15 +15,20 @@ const adviseSchema = type({
 		"One concrete piece of advice for the agent you are watching. Terse, specific, actionable.",
 	),
 	"severity?": type("'nit' | 'concern' | 'blocker'").describe("How strongly to weigh this. Omit for a plain nit."),
+	"gateId?": type("string").describe("Nikoflow review gate id when this advice is the verdict for that gate."),
+	"verdict?": type("'approve' | 'blocker'").describe("Explicit Nikoflow review verdict when reviewing a gate."),
 });
 
 export type AdviseParams = typeof adviseSchema.infer;
 
 export type AdvisorSeverity = "nit" | "concern" | "blocker";
+export type AdvisorReviewVerdict = "approve" | "blocker";
 
 export interface AdviseDetails {
 	note: string;
 	severity?: AdvisorSeverity;
+	gateId?: string;
+	verdict?: AdvisorReviewVerdict;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
 }
@@ -32,6 +37,8 @@ export interface AdviseDetails {
 export interface AdvisorNote {
 	note: string;
 	severity?: AdvisorSeverity;
+	gateId?: string;
+	verdict?: AdvisorReviewVerdict;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
 }
@@ -157,8 +164,9 @@ export function deriveAdvisorTelemetry(
  */
 export const ADVISOR_DEFAULT_TOOL_NAMES: ReadonlySet<string> = new Set(["read", "grep", "glob"]);
 
-function advisorNoteDedupeKey(note: string): string {
-	return note.trim().replace(/\s+/g, " ");
+function advisorNoteDedupeKey(note: string, gateId?: string): string {
+	const normalized = note.trim().replace(/\s+/g, " ");
+	return gateId ? `${gateId}\0${normalized}` : normalized;
 }
 
 /** Rank advisor severities so the dedupe state can detect a real escalation
@@ -182,7 +190,14 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	#deliveredNoteSeverities = new Map<string, number>();
 	#inProgressUpdate = false;
 
-	constructor(private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void) {}
+	constructor(
+		private readonly onAdvice: (
+			note: string,
+			severity?: AdviseDetails["severity"],
+			gateId?: string,
+			verdict?: AdvisorReviewVerdict,
+		) => void,
+	) {}
 
 	/**
 	 * Mark whether the next advisor prompt reviews an in-progress primary turn.
@@ -213,21 +228,25 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 				useless: true,
 			};
 		}
-		const key = advisorNoteDedupeKey(args.note);
+		const key = advisorNoteDedupeKey(args.note, args.gateId);
 		const rank = advisorSeverityRank(args.severity);
+		const details: AdviseDetails = { note: args.note };
+		if (args.severity) details.severity = args.severity;
+		if (args.gateId) details.gateId = args.gateId;
+		if (args.verdict) details.verdict = args.verdict;
 		const previousRank = this.#deliveredNoteSeverities.get(key) ?? 0;
 		if (rank <= previousRank) {
 			return {
 				content: [{ type: "text", text: "Duplicate advice ignored." }],
-				details: { note: args.note, severity: args.severity },
+				details,
 				useless: true,
 			};
 		}
 		this.#deliveredNoteSeverities.set(key, rank);
-		this.onAdvice(args.note, args.severity);
+		this.onAdvice(args.note, args.severity, args.gateId, args.verdict);
 		return {
 			content: [{ type: "text", text: "Recorded." }],
-			details: { note: args.note, severity: args.severity },
+			details,
 			useless: true,
 		};
 	}

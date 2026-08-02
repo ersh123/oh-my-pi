@@ -149,6 +149,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--plan-yolo-into": (result, value) => {
 		result.planYoloInto = value;
 	},
+	"--nikoflow-qa": (result, value) => {
+		result.nikoflowQa = value;
+	},
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},

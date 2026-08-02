@@ -35,6 +35,10 @@ export function getSeparator(style: StatusLineSeparatorStyle, theme: Theme): Sep
 			const pipe = trimSep(theme.sep.pipe);
 			return { left: pipe, right: pipe };
 		}
+		case "mission-control": {
+			const pipe = trimSep(theme.sep.pipe);
+			return { left: pipe, right: pipe };
+		}
 		case "block":
 			return { left: theme.sep.block, right: theme.sep.block };
 		case "none":

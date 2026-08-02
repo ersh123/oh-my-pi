@@ -596,8 +596,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.pr": "\uea64",
 	// pick:  | alt: ⊛ ◍ 
 	"icon.tokens": "\ue26b",
-	// pick:  | alt: ◫ ▦
-	"icon.context": "\ue70f",
+	// pick:  (nf-cod-symbol_ruler) | alt: ◫ ▦
+	"icon.context": "\uea7c",
 	// pick:  | alt: $ ¢
 	"icon.cost": "\uf155",
 	// pick:  | alt: ◷ ◴

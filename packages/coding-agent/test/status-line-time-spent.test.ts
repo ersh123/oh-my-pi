@@ -58,6 +58,7 @@ function createCtx(activeMs: number): SegmentContext {
 			cost: 0,
 			tokensPerSecond: null,
 		},
+		perModelUsage: null,
 		contextPercent: 0,
 		contextTokens: 0,
 		contextWindow: 0,
@@ -68,6 +69,7 @@ function createCtx(activeMs: number): SegmentContext {
 		worktree: null,
 		git: { branch: null, status: null, pr: null },
 		usage: null,
+		balance: null,
 	};
 }
 

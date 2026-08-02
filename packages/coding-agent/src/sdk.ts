@@ -1752,6 +1752,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
+			getNikoflowState: () => session?.getNikoflowState(),
+			defineNikoflowTickets: tickets =>
+				session?.defineNikoflowTickets(tickets) ?? {
+					tickets: [],
+					errors: ["Nikoflow ticket capture is unavailable before session initialization"],
+				},
+			recordNikoflowResearch: record =>
+				session?.recordNikoflowResearch(record) ?? {
+					record: null,
+					errors: ["Nikoflow Research capture is unavailable before session initialization"],
+				},
+			requestNikoflowActivation: () => session?.requestNikoflowActivation() ?? Promise.resolve(false),
+			recordNikoflowTddEvidence: stage =>
+				session?.recordNikoflowTddEvidence(stage) ?? {
+					evidence: null,
+					errors: ["Nikoflow TDD evidence capture is unavailable before session initialization"],
+				},
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,

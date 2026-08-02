@@ -2012,13 +2012,15 @@ export const patch = {
 // API: cherryPick
 // ════════════════════════════════════════════════════════════════════════════
 
+const CHERRY_PICK_ENV = { LC_ALL: "C" } satisfies Record<string, string>;
+
 export const cherryPick = Object.assign(
 	async function cherryPick(cwd: string, revision: string, signal?: AbortSignal): Promise<void> {
-		await runEffect(cwd, ["cherry-pick", revision], { signal });
+		await runEffect(cwd, ["cherry-pick", revision], { env: CHERRY_PICK_ENV, signal });
 	},
 	{
 		async abort(cwd: string, signal?: AbortSignal): Promise<void> {
-			await runEffect(cwd, ["cherry-pick", "--abort"], { signal });
+			await runEffect(cwd, ["cherry-pick", "--abort"], { env: CHERRY_PICK_ENV, signal });
 		},
 		/**
 		 * Skip the current commit of an in-progress cherry-pick sequence and
@@ -2027,7 +2029,7 @@ export const cherryPick = Object.assign(
 		 * `--abort`, throws away every remaining commit in the range.
 		 */
 		async skip(cwd: string, signal?: AbortSignal): Promise<void> {
-			await runEffect(cwd, ["cherry-pick", "--skip"], { signal });
+			await runEffect(cwd, ["cherry-pick", "--skip"], { env: CHERRY_PICK_ENV, signal });
 		},
 		/**
 		 * True when a cherry-pick failure was caused by the current commit

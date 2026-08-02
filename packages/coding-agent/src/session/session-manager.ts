@@ -203,6 +203,10 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	/** Per-model usage breakdown, keyed by "provider/modelId" from model_change entries. */
+	#usageByModel = new Map<string, UsageStatistics>();
+	/** The model in effect for the next assistant message (updated by model_change entries). */
+	#currentModel: string | null = null;
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -210,6 +214,8 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#usageByModel.clear();
+		this.#currentModel = null;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -230,7 +236,23 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		// Track model switches for per-model attribution.
+		if (entry.type === "model_change") {
+			this.#currentModel = entry.model;
+		}
+
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+
+		// Attribute usage to the model that produced it.
+		if (usage && this.#currentModel) {
+			let modelUsage = this.#usageByModel.get(this.#currentModel);
+			if (!modelUsage) {
+				modelUsage = emptyUsageStatistics();
+				this.#usageByModel.set(this.#currentModel, modelUsage);
+			}
+			addUsage(modelUsage, usage);
+		}
 	}
 
 	has(id: string): boolean {
@@ -275,6 +297,15 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	/** Per-model usage breakdown snapshot. Keys are "provider/modelId" strings. */
+	usageByModelSnapshot(): Map<string, UsageStatistics> {
+		const result = new Map<string, UsageStatistics>();
+		for (const [key, stats] of this.#usageByModel) {
+			result.set(key, { ...stats });
+		}
+		return result;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -344,6 +375,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getUsageStatistics"
+	| "getUsageByModel"
 	| "putBlob"
 	| "putBlobSync"
 >;
@@ -1744,6 +1776,11 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
+	}
+
+	/** Per-model usage breakdown. Keys are "provider/modelId" strings. */
+	getUsageByModel(): Map<string, UsageStatistics> {
+		return this.#index.usageByModelSnapshot();
 	}
 
 	/**

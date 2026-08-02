@@ -7,6 +7,7 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
+import { fetchProviderBalance, isBalanceSupported, type ProviderBalance } from "../../../session/provider-balance";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import * as git from "../../../utils/git";
@@ -21,8 +22,9 @@ import {
 	detectCodexResetFireworks,
 } from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
+import { getMissionControlNikoflowState, type MissionControlSignal } from "./mission-control";
 import { getPreset } from "./presets";
-import { renderSegment, type SegmentContext } from "./segments";
+import { renderSegment, SEGMENTS, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
@@ -408,6 +410,9 @@ export class StatusLineComponent implements Component {
 	#latestAppliedUsageRefreshSequence = 0;
 	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
 	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
+	#cachedBalance: ProviderBalance | null = null;
+	#balanceFetchedAt = 0;
+	#balanceInFlight = false;
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -426,6 +431,7 @@ export class StatusLineComponent implements Component {
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			showLabels: settings.get("statusLine.showLabels"),
 		};
 	}
 	#gitEnabled(): boolean {
@@ -735,6 +741,9 @@ export class StatusLineComponent implements Component {
 		this.#cachedUsage = null;
 		this.#usageFetchedAt = 0;
 		this.#usageInFlight = false;
+		this.#cachedBalance = null;
+		this.#balanceFetchedAt = 0;
+		this.#balanceInFlight = false;
 		this.#contextUsageCache = undefined;
 		this.#lastTokensPerSecond = null;
 		this.#lastTokensPerSecondTimestamp = null;
@@ -1219,6 +1228,41 @@ export class StatusLineComponent implements Component {
 		}, STATUS_USAGE_START_DELAY_MS);
 	}
 
+	/**
+	 * Poll the active model's provider for residual balance (DeepSeek, etc.).
+	 * 5-min TTL, fire-and-forget — the segment reads the cache synchronously.
+	 */
+	refreshBalanceInBackground(): void {
+		if (this.#balanceInFlight) return;
+		if (this.#balanceFetchedAt > 0 && Date.now() - this.#balanceFetchedAt < 5 * 60_000) return;
+
+		const session = this.session;
+		const model = session.state.model;
+		if (!model?.baseUrl) return;
+		if (!isBalanceSupported(model.provider, model.baseUrl)) return;
+		// Subscription/OAuth providers don't expose a balance endpoint.
+		if (session.modelRegistry.isUsingOAuth(model)) return;
+
+		this.#balanceInFlight = true;
+		void session.modelRegistry
+			.getApiKey(model, session.sessionId)
+			.then(apiKey =>
+				!apiKey || this.#disposed || this.session !== session
+					? null
+					: fetchProviderBalance(model.provider, model.baseUrl, apiKey),
+			)
+			.then(result => {
+				if (this.#disposed || this.session !== session) return;
+				this.#cachedBalance = result;
+				this.#balanceFetchedAt = Date.now();
+				this.#balanceInFlight = false;
+			})
+			.catch(() => {
+				this.#balanceFetchedAt = Date.now();
+				this.#balanceInFlight = false;
+			});
+	}
+
 	async #runUsageRefresh(session: AgentSession, fetcher: (signal?: AbortSignal) => Promise<unknown>): Promise<void> {
 		if (this.#disposed || this.session !== session) {
 			this.#usageInFlight = false;
@@ -1492,6 +1536,7 @@ export class StatusLineComponent implements Component {
 
 		// Trigger background fetch (5-min TTL); render uses cached value
 		this.refreshUsageInBackground();
+		this.refreshBalanceInBackground();
 
 		// Get usage statistics
 		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
@@ -1570,6 +1615,7 @@ export class StatusLineComponent implements Component {
 			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
+			perModelUsage: this.session.sessionManager?.getUsageByModel?.() ?? null,
 			contextPercent,
 			contextTokens,
 			contextWindow,
@@ -1583,7 +1629,20 @@ export class StatusLineComponent implements Component {
 			},
 			worktree: activeRepoCache.worktree,
 			usage: this.#cachedUsage,
+			balance: this.#cachedBalance,
 		};
+	}
+
+	/**
+	 * Prepend a dim uppercase label when showLabels is enabled and the segment
+	 * defines one. Renders as `LABEL  value` — the label is muted, the icon/value
+	 * stays in its original color.
+	 */
+	#maybeLabel(segId: StatusLineSegmentId, content: string): string {
+		if (!this.#resolveSettings().showLabels) return content;
+		const segment = SEGMENTS[segId];
+		if (!segment?.label) return content;
+		return `${theme.fg("muted", segment.label)} ${content}`;
 	}
 
 	#resolveSettings(): EffectiveStatusLineSettings {
@@ -1632,6 +1691,215 @@ export class StatusLineComponent implements Component {
 		const noun = this.#subagentCount === 1 ? "agent" : "agents";
 		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount} ${noun}`);
 	}
+	#missionControlReasoning(): string {
+		const model = this.session.state.model;
+		if (!model?.thinking) return "ВЫКЛ";
+		if (this.session.isAutoThinking) {
+			const resolved = this.session.autoResolvedThinkingLevel();
+			return resolved ? `AUTO/${String(resolved).toUpperCase()}` : "AUTO";
+		}
+		const labels: Record<string, string> = {
+			minimal: "MIN",
+			low: "LOW",
+			medium: "MED",
+			high: "HIGH",
+			xhigh: "XHIGH",
+			max: "MAX",
+		};
+		const configured = this.session.configuredThinkingLevel() ?? this.session.state.thinkingLevel;
+		return labels[String(configured ?? "")] ?? String(configured ?? "ВЫКЛ").toUpperCase();
+	}
+
+	#buildMissionControlDetail(width: number): { content: string; width: number } | undefined {
+		if (width < 76) return undefined;
+
+		const state = this.session.getNikoflowState?.();
+		const metrics = this.#buildSegmentContext(width, {}, false, true, false, false);
+		const modelName = sanitizeStatusText(
+			this.session.state.model?.name || this.session.state.model?.id || "без модели",
+		);
+		const reasoning = this.#missionControlReasoning();
+		const compactNumber = (value: number): string =>
+			value >= 1000 ? `${(value / 1000).toFixed(1)}К` : String(value);
+		const divider = theme.fg("statusLineSep", ` ${theme.sep.pipe} `);
+		const render = (parts: readonly string[]) => {
+			const clipped = truncateToWidth(parts.join(divider), width);
+			const bgAnsi = this.#resolveSettings().transparent ? "\x1b[49m" : theme.getBgAnsi("statusLineBg");
+			const fill = Math.max(0, width - visibleWidth(clipped));
+			return { content: `${bgAnsi}${clipped}${" ".repeat(fill)}\x1b[0m`, width };
+		};
+
+		if (!state) {
+			const context = metrics.contextPercent == null ? "—" : `${Math.round(metrics.contextPercent)}%`;
+			const rate =
+				metrics.usageStats.tokensPerSecond == null ? "—" : `${metrics.usageStats.tokensPerSecond.toFixed(1)} ток/с`;
+			const balance = metrics.balance ? `$${metrics.balance.amount.toFixed(2)}` : "—";
+			const quota = metrics.usage?.fiveHour ? `${Math.round(100 - metrics.usage.fiveHour.percent)}%` : "—";
+			return render([
+				theme.fg("statusLineSubagents", "СЕССИЯ / РИТМ"),
+				theme.fg("statusLineModel", `МОДЕЛЬ ${modelName}`),
+				theme.fg("statusLineContext", `REASONING ${reasoning}`),
+				theme.fg("accent", `ТЕМП ${rate}`),
+				theme.fg("statusLineContext", `КОНТЕКСТ ${context}`),
+				theme.fg("statusLineSubagents", `АГЕНТЫ ${metrics.subagentCount}`),
+				theme.fg("success", `БАЛАНС ${balance}`),
+				theme.fg("warning", `КВОТА ${quota}`),
+				theme.fg("dim", `ТОКЕНЫ ${compactNumber(metrics.usageStats.totalTokens)}`),
+			]);
+		}
+
+		const hud = getMissionControlNikoflowState(state);
+		const signal: Record<MissionControlSignal, { label: string; color: "success" | "warning" | "error" | "accent" }> =
+			{
+				active: { label: "В РАБОТЕ", color: "accent" },
+				waiting: { label: "ОЖИДАЕТ ШЛЮЗ", color: "warning" },
+				ready: { label: "ГОТОВО", color: "accent" },
+				red: { label: "КРАСНЫЙ", color: "error" },
+				green: { label: "ПРОЙДЕНО", color: "success" },
+				waived: { label: "ОТКАЗ ОДОБРЕН", color: "warning" },
+				complete: { label: "ЗАВЕРШЕНО", color: "success" },
+			};
+		const phaseLabels: Record<string, string> = {
+			grilling: "РАЗБОР",
+			adr: "РЕШЕНИЕ",
+			prd: "ПЛАН",
+			tickets: "ТИКЕТЫ",
+			execute: "ВЫПОЛНЕНИЕ",
+			research: "ИССЛЕДОВАНИЕ",
+			verify: "ПРОВЕРКА",
+		};
+		const current = signal[hud.signal];
+		const mark = (phaseIndex: number): string => {
+			const phase = hud.phases[phaseIndex]!;
+			const label = phaseLabels[phase] ?? phase.toUpperCase();
+			if (phaseIndex < hud.completedPhaseCount) return theme.fg("success", `${theme.status.done} ${label}`);
+			if (phaseIndex === hud.completedPhaseCount) return theme.fg(current.color, `${theme.status.running} ${label}`);
+			return theme.fg("dim", `${theme.status.shadowed} ${label}`);
+		};
+		const progress =
+			state.depth === "research"
+				? "ДОКАЗАТЕЛЬСТВА СОБИРАЮТСЯ"
+				: hud.totalTickets > 0
+					? `ТИКЕТ ${hud.activeTicketId ?? "—"} ${hud.completedTickets}/${hud.totalTickets}`
+					: "ТИКЕТЫ ОЖИДАЮТ";
+		const identity = `${theme.fg("statusLineSubagents", "NIKOFLOW")} ${theme.fg("dim", `/ ${state.depth.toUpperCase()}`)}`;
+		const signalText = theme.fg(
+			current.color,
+			`${theme.status.enabled} ${phaseLabels[hud.phase ?? ""] ?? "ЗАВЕРШЕНО"} · ${current.label}`,
+		);
+		const compact = [
+			identity,
+			signalText,
+			theme.fg("statusLineContext", progress),
+			theme.fg("statusLineModel", `МОДЕЛЬ ${modelName}`),
+			theme.fg("accent", `REASONING ${reasoning}`),
+		];
+		const full = [
+			identity,
+			hud.phases.map((_, index) => mark(index)).join(divider),
+			theme.fg("statusLineContext", progress),
+			signalText,
+			theme.fg("statusLineModel", `МОДЕЛЬ ${modelName}`),
+			theme.fg("accent", `REASONING ${reasoning}`),
+		];
+		return render(width >= 128 ? full : compact);
+	}
+
+	#buildMissionControlCanvas(width: number): readonly { content: string; width: number }[] | undefined {
+		if (width < 76) return undefined;
+
+		const state = this.session.getNikoflowState?.();
+		const metrics = this.#buildSegmentContext(width, {}, false, true, false, false);
+		const modelName = sanitizeStatusText(
+			this.session.state.model?.name || this.session.state.model?.id || "без модели",
+		);
+		const reasoning = this.#missionControlReasoning();
+		const contextPercent = metrics.contextPercent == null ? 0 : Math.round(metrics.contextPercent);
+		const tokenRate =
+			metrics.usageStats.tokensPerSecond == null ? 0 : Math.round(metrics.usageStats.tokensPerSecond * 10) / 10;
+		const balance = metrics.balance ? `$${metrics.balance.amount.toFixed(2)}` : "—";
+		const hud = state ? getMissionControlNikoflowState(state) : undefined;
+		const phaseName: Record<string, string> = {
+			grilling: "РАЗБОР",
+			adr: "РЕШЕНИЕ",
+			prd: "ПЛАН",
+			tickets: "ТИКЕТЫ",
+			execute: "ВЫПОЛНЕНИЕ",
+			research: "ИССЛЕДОВАНИЕ",
+			verify: "ПРОВЕРКА",
+		};
+		const progress =
+			state?.depth === "research"
+				? "ДОКАЗАТЕЛЬСТВА СОБИРАЮТСЯ"
+				: `ТИКЕТ ${hud?.activeTicketId ?? "ОЖИДАЕТ"} ${hud?.completedTickets ?? 0}/${hud?.totalTickets ?? 0}`;
+		const bgAnsi = this.#resolveSettings().transparent ? "\x1b[49m" : theme.getBgAnsi("statusLineBg");
+		const frame = (content: string) => {
+			const clipped = truncateToWidth(content, width);
+			const fill = Math.max(0, width - visibleWidth(clipped));
+			return { content: `${bgAnsi}${clipped}${" ".repeat(fill)}\x1b[0m`, width };
+		};
+		const meter = (value: number) => {
+			const filled = Math.round((Math.max(0, Math.min(100, value)) / 100) * 10);
+			return `${theme.fg("accent", "█".repeat(filled))}${theme.fg("dim", "░".repeat(10 - filled))}`;
+		};
+		const header = [
+			theme.fg("statusLineSep", "╭─"),
+			theme.fg("statusLineSubagents", ` ${theme.icon.session} MISSION CONTROL `),
+			theme.fg("statusLineSep", theme.sep.pipe),
+			theme.fg("statusLineModel", ` ${theme.icon.model} МОДЕЛЬ ${modelName} `),
+			theme.fg("statusLineSep", theme.sep.pipe),
+			theme.fg("accent", ` ${theme.icon.prewalk} REASONING ${reasoning} `),
+			theme.fg("statusLineSep", "─╮"),
+		].join("");
+		const telemetry = [
+			theme.fg("statusLineSep", "│ "),
+			theme.fg("statusLineContext", `${theme.icon.context} CTX ${contextPercent}% `),
+			meter(contextPercent),
+			theme.fg("statusLineSep", "  │  "),
+			theme.fg("accent", `${theme.icon.throughput} ${tokenRate.toFixed(1)} TOK/С`),
+			theme.fg("statusLineSep", "  │  "),
+			theme.fg("success", `${theme.icon.cost} БАЛАНС ${balance}`),
+			theme.fg("statusLineSep", "  │  "),
+			theme.fg("statusLineSubagents", `${theme.icon.agents} ${metrics.subagentCount}`),
+			theme.fg("statusLineSep", " │"),
+		].join("");
+		const footer = hud
+			? [
+					theme.fg("statusLineSep", "╰─ "),
+					theme.fg(
+						hud.signal === "red" ? "error" : hud.signal === "waiting" ? "warning" : "success",
+						`${theme.icon.plan} NIKOFLOW ${phaseName[hud.phase ?? ""] ?? "ЗАВЕРШЕНО"}`,
+					),
+					theme.fg("statusLineSep", " ── "),
+					theme.fg("statusLineContext", progress),
+					theme.fg("statusLineSep", " ── "),
+					theme.fg(
+						"dim",
+						hud.phases
+							.map((phase, index) =>
+								index < hud.completedPhaseCount ? `●${phase.slice(0, 3)}` : `○${phase.slice(0, 3)}`,
+							)
+							.join("─"),
+					),
+					theme.fg("statusLineSep", " ─╯"),
+				].join("")
+			: [
+					theme.fg("statusLineSep", "╰─ "),
+					theme.fg(
+						"statusLineContext",
+						`${theme.icon.tokens} ТОКЕНЫ ${metrics.usageStats.totalTokens.toLocaleString("ru-RU")}`,
+					),
+					theme.fg("statusLineSep", " ── "),
+					theme.fg(
+						"accent",
+						`${theme.icon.cache} КЭШ ${Math.round(metrics.usageStats.cacheRead ?? 0).toLocaleString("ru-RU")}`,
+					),
+					theme.fg("statusLineSep", " ── "),
+					theme.fg("dim", "ГОТОВ К РАБОТЕ"),
+					theme.fg("statusLineSep", " ─╯"),
+				].join("");
+		return [frame(header), frame(telemetry), frame(footer)];
+	}
 
 	#buildStatusLine(width: number): string {
 		const effectiveSettings = this.#resolveSettings();
@@ -1675,7 +1943,7 @@ export class StatusLineComponent implements Component {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
-				leftParts.push(rendered.content);
+				leftParts.push(this.#maybeLabel(segId, rendered.content));
 				leftSegIds.push(segId);
 			}
 		}
@@ -1685,7 +1953,7 @@ export class StatusLineComponent implements Component {
 			if (subagentBadge && segId === "subagents") continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
-				rightParts.push(rendered.content);
+				rightParts.push(this.#maybeLabel(segId, rendered.content));
 			}
 		}
 
@@ -1816,16 +2084,25 @@ export class StatusLineComponent implements Component {
 		return leftGroup + gapFill + rightGroup;
 	}
 
-	getTopBorder(width: number): { content: string; width: number } {
+	getTopBorder(width: number): {
+		content: string;
+		width: number;
+		detail?: { content: string; width: number };
+		details?: readonly { content: string; width: number }[];
+	} {
 		let content = this.#buildStatusLine(width);
 		if (this.#focusedAgentId && content) {
 			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
 			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
 			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 		}
+		const missionControl = this.#resolveSettings().separator === "mission-control" && !this.#focusedAgentId;
+		const detail = missionControl ? this.#buildMissionControlDetail(width) : undefined;
+		const details = missionControl ? this.#buildMissionControlCanvas(width) : undefined;
 		return {
 			content,
 			width: visibleWidth(content),
+			...(details ? { details } : detail ? { detail } : {}),
 		};
 	}
 

@@ -90,4 +90,38 @@ describe("Editor lazy top-border provider (#4145)", () => {
 		expect(widths[0]).toBe(editor.getTopBorderAvailableWidth(80));
 		expect(widths[1]).toBe(editor.getTopBorderAvailableWidth(120));
 	});
+
+	it("renders an optional operations row inside the editor frame", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const availableWidth = editor.getTopBorderAvailableWidth(80);
+		const detail = "NIKOFLOW / EXEC · TSK-004 · GREEN";
+		editor.setTopBorder({
+			content: "OMP / Mission Control",
+			width: "OMP / Mission Control".length,
+			detail: { content: detail + " ".repeat(availableWidth - detail.length), width: availableWidth },
+		});
+
+		const frame = editor.render(80);
+		expect(frame).toHaveLength(3);
+		expect(frame[1]).toContain("NIKOFLOW / EXEC · TSK-004 · GREEN");
+	});
+	it("renders ordered graphic-detail rows instead of the legacy single detail", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const availableWidth = editor.getTopBorderAvailableWidth(80);
+		editor.setTopBorder({
+			content: "OMP / Mission Control",
+			width: "OMP / Mission Control".length,
+			detail: { content: "legacy".padEnd(availableWidth), width: availableWidth },
+			details: [
+				{ content: "KITTY GRAPHIC ROW 1".padEnd(availableWidth), width: availableWidth },
+				{ content: "KITTY GRAPHIC ROW 2".padEnd(availableWidth), width: availableWidth },
+			],
+		});
+
+		const frame = editor.render(80);
+		expect(frame).toHaveLength(4);
+		expect(frame[1]).toContain("KITTY GRAPHIC ROW 1");
+		expect(frame[2]).toContain("KITTY GRAPHIC ROW 2");
+		expect(frame.join("\\n")).not.toContain("legacy");
+	});
 });

@@ -358,6 +358,7 @@ const gitSegment: StatusLineSegment = {
 
 const prSegment: StatusLineSegment = {
 	id: "pr",
+	label: "PR",
 	render(ctx) {
 		const { pr } = ctx.git;
 		if (!pr) return { content: "", visible: false };
@@ -370,6 +371,7 @@ const prSegment: StatusLineSegment = {
 
 const subagentsSegment: StatusLineSegment = {
 	id: "subagents",
+	label: "AGENTS",
 	render(ctx) {
 		if (ctx.subagentCount === 0) {
 			return { content: "", visible: false };
@@ -381,6 +383,7 @@ const subagentsSegment: StatusLineSegment = {
 
 const tokenInSegment: StatusLineSegment = {
 	id: "token_in",
+	label: "IN",
 	render(ctx) {
 		const { input } = ctx.usageStats;
 		if (!input) return { content: "", visible: false };
@@ -392,6 +395,7 @@ const tokenInSegment: StatusLineSegment = {
 
 const tokenOutSegment: StatusLineSegment = {
 	id: "token_out",
+	label: "OUT",
 	render(ctx) {
 		const { output } = ctx.usageStats;
 		if (!output) return { content: "", visible: false };
@@ -403,6 +407,7 @@ const tokenOutSegment: StatusLineSegment = {
 
 const tokenTotalSegment: StatusLineSegment = {
 	id: "token_total",
+	label: "TOKENS",
 	render(ctx) {
 		// Excludes cacheRead: that field re-reads the full cached context every
 		// turn, making the cumulative sum N×context_size. Orchestration cache read
@@ -419,6 +424,7 @@ const tokenTotalSegment: StatusLineSegment = {
 
 const tokenRateSegment: StatusLineSegment = {
 	id: "token_rate",
+	label: "SPEED",
 	render(ctx) {
 		const { tokensPerSecond } = ctx.usageStats;
 		if (!tokensPerSecond) return { content: "", visible: false };
@@ -430,6 +436,7 @@ const tokenRateSegment: StatusLineSegment = {
 
 const costSegment: StatusLineSegment = {
 	id: "cost",
+	label: "COST",
 	render(ctx) {
 		const { cost, premiumRequests } = ctx.usageStats;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
@@ -453,6 +460,7 @@ const costSegment: StatusLineSegment = {
 
 const contextPctSegment: StatusLineSegment = {
 	id: "context_pct",
+	label: "CTX",
 	render(ctx) {
 		const pct = ctx.contextPercent;
 		const window = ctx.contextWindow;
@@ -469,6 +477,7 @@ const contextPctSegment: StatusLineSegment = {
 
 const contextTotalSegment: StatusLineSegment = {
 	id: "context_total",
+	label: "WIN",
 	render(ctx) {
 		const window = ctx.contextWindow;
 		if (!window) return { content: "", visible: false };
@@ -489,6 +498,7 @@ const contextTotalSegment: StatusLineSegment = {
  */
 const timeSpentSegment: StatusLineSegment = {
 	id: "time_spent",
+	label: "ACTIVE",
 	render(ctx) {
 		if (ctx.activeMs < 1000) return { content: "", visible: false };
 		return { content: withIcon(theme.icon.time, formatDuration(ctx.activeMs)), visible: true };
@@ -497,6 +507,7 @@ const timeSpentSegment: StatusLineSegment = {
 
 const timeSegment: StatusLineSegment = {
 	id: "time",
+	label: "TIME",
 	render(ctx) {
 		const opts = ctx.options.time ?? {};
 		const now = new Date();
@@ -521,6 +532,7 @@ const timeSegment: StatusLineSegment = {
 
 const sessionSegment: StatusLineSegment = {
 	id: "session",
+	label: "ID",
 	render(ctx) {
 		const sessionManager = ctx.session.sessionManager;
 		const sessionId = sessionManager?.getSessionId?.();
@@ -532,6 +544,7 @@ const sessionSegment: StatusLineSegment = {
 
 const hostnameSegment: StatusLineSegment = {
 	id: "hostname",
+	label: "HOST",
 	render(_ctx) {
 		const name = os.hostname().split(".")[0];
 		return { content: withIcon(theme.icon.host, name), visible: true };
@@ -540,6 +553,7 @@ const hostnameSegment: StatusLineSegment = {
 
 const cacheReadSegment: StatusLineSegment = {
 	id: "cache_read",
+	label: "C-RD",
 	render(ctx) {
 		const { cacheRead } = ctx.usageStats;
 		if (!cacheRead) return { content: "", visible: false };
@@ -552,6 +566,7 @@ const cacheReadSegment: StatusLineSegment = {
 
 const cacheWriteSegment: StatusLineSegment = {
 	id: "cache_write",
+	label: "C-WR",
 	render(ctx) {
 		const { cacheWrite } = ctx.usageStats;
 		if (!cacheWrite) return { content: "", visible: false };
@@ -564,6 +579,7 @@ const cacheWriteSegment: StatusLineSegment = {
 
 const cacheHitSegment: StatusLineSegment = {
 	id: "cache_hit",
+	label: "CACHE",
 	render(ctx) {
 		const { cacheRead, cacheWrite, input } = ctx.usageStats;
 		if (!cacheRead) return { content: "", visible: false };
@@ -584,8 +600,103 @@ const cacheHitSegment: StatusLineSegment = {
 	},
 };
 
+const cacheHitModelSegment: StatusLineSegment = {
+	id: "cache_hit_model",
+	label: "CACHE",
+	render(ctx) {
+		const state = ctx.session.state;
+		const model = state.model;
+		if (!model || !ctx.perModelUsage) return { content: "", visible: false };
+
+		// Match by "provider/modelId" key used in model_change entries.
+		const modelKey = `${model.provider}/${model.id}`;
+		const stats = ctx.perModelUsage.get(modelKey);
+		if (!stats || !stats.cacheRead) return { content: "", visible: false };
+
+		const total = stats.cacheRead + stats.cacheWrite + stats.input;
+		const rate = (stats.cacheRead / total) * 100;
+
+		// Short model name for compact display.
+		let shortName = model.id;
+		if (shortName.startsWith("gpt-")) shortName = shortName.slice(4);
+		if (shortName.startsWith("claude-")) shortName = shortName.slice(7);
+
+		const content = `${theme.icon.cache} ${theme.fg("statusLineSpend", `${rate.toFixed(1)}%`)} ${theme.fg("muted", shortName)}`;
+		return { content, visible: true };
+	},
+};
+
+const reprocessedSegment: StatusLineSegment = {
+	id: "reprocessed",
+	label: "REPROC",
+	render(ctx) {
+		const { input, cacheWrite } = ctx.usageStats;
+		// Reprocessed = tokens the provider had to re-evaluate (not served from
+		// cache). For explicit-cache providers this is input + cacheWrite (the
+		// write premium); for automatic-cache providers cacheWrite is 0 and this
+		// is just the uncached input.
+		const reprocessed = input + cacheWrite;
+		if (!reprocessed) return { content: "", visible: false };
+
+		const content = withIcon("↻", formatNumber(reprocessed));
+		return { content: theme.fg("muted", content), visible: true };
+	},
+};
+
+/**
+ * Dollar savings from prefix caching — the economic impact of cache-stable
+ * compaction. Computes what the cache-read tokens *would* have cost at full
+ * input price vs what they actually cost at the cache-read price.
+ *
+ *   saved = cacheRead × (model.cost.input − model.cost.cacheRead) / 1M
+ *
+ * Hidden when the model has no cache discount (cacheRead price ≥ input price)
+ * or when savings are under one cent.
+ */
+const cacheSavedSegment: StatusLineSegment = {
+	id: "cache_saved",
+	label: "SAVED",
+	render(ctx) {
+		const { cacheRead } = ctx.usageStats;
+		const model = ctx.session.state.model;
+		if (!cacheRead || !model?.cost) return { content: "", visible: false };
+
+		const priceDelta = model.cost.input - model.cost.cacheRead;
+		if (priceDelta <= 0) return { content: "", visible: false };
+
+		const saved = (cacheRead * priceDelta) / 1_000_000;
+		if (saved < 0.01) return { content: "", visible: false };
+
+		const content = withIcon(theme.icon.cost, `$${saved.toFixed(2)}`);
+		return { content: theme.fg("statusLineSpend", content), visible: true };
+	},
+};
+
+/**
+ * Residual balance for the active model's provider. Only shown when the
+ * provider exposes a balance API (e.g. DeepSeek `/user/balance`). Polls every
+ * 5 min in the background; hidden entirely for subscription/OAuth providers
+ * (those use the `usage` segment instead).
+ */
+const providerBalanceSegment: StatusLineSegment = {
+	id: "provider_balance",
+	label: "БАЛАНС",
+	render(ctx) {
+		const balance = ctx.balance;
+		if (!balance) return { content: "", visible: false };
+
+		const symbol = balance.currency === "USD" ? "$" : `${balance.currency} `;
+		const text = balance.currency === "USD"
+			? `${symbol}${balance.amount.toFixed(2)}`
+			: `${balance.amount.toFixed(2)}${symbol}`;
+		const content = withIcon(theme.icon.tokens, text);
+		return { content: theme.fg("statusLineSpend", content), visible: true };
+	},
+};
+
 const sessionNameSegment: StatusLineSegment = {
 	id: "session_name",
+	label: "SESS",
 	render(ctx) {
 		const sessionManager = ctx.session.sessionManager;
 		const name = sessionManager?.getSessionName();
@@ -601,6 +712,7 @@ const sessionNameSegment: StatusLineSegment = {
 
 const collabSegment: StatusLineSegment = {
 	id: "collab",
+	label: "COLLAB",
 	render(ctx) {
 		if (!ctx.collab) return { content: "", visible: false };
 		const label =
@@ -634,6 +746,7 @@ function formatUsageReset(value: number, unit: "m" | "h"): string {
 
 const usageSegment: StatusLineSegment = {
 	id: "usage",
+	label: "USAGE",
 	render(ctx) {
 		const u = ctx.usage;
 		if (!u || (!u.fiveHour && !u.sevenDay)) {
@@ -644,24 +757,26 @@ const usageSegment: StatusLineSegment = {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(theme.fg("accent", tier));
 		}
-		if (u.fiveHour) {
-			const pct = u.fiveHour.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
-			const reset =
-				u.fiveHour.resetMinutes !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
-					: "";
-			parts.push(`5h ${pctText}${reset}`);
-		}
-		if (u.sevenDay) {
-			const pct = u.sevenDay.percent;
-			const pctText = theme.fg(pickUsageColor(pct), `${Math.round(pct)}%`);
-			const reset =
-				u.sevenDay.resetHours !== undefined
-					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
-					: "";
-			parts.push(`7d ${pctText}${reset}`);
-		}
+	if (u.fiveHour) {
+		const used = u.fiveHour.percent;
+		const remaining = Math.max(0, 100 - used);
+		const pctText = theme.fg(pickUsageColor(used), `${Math.round(remaining)}%`);
+		const reset =
+			u.fiveHour.resetMinutes !== undefined
+				? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
+				: "";
+		parts.push(`5h ${pctText}${reset}`);
+	}
+	if (u.sevenDay) {
+		const used = u.sevenDay.percent;
+		const remaining = Math.max(0, 100 - used);
+		const pctText = theme.fg(pickUsageColor(used), `${Math.round(remaining)}%`);
+		const reset =
+			u.sevenDay.resetHours !== undefined
+				? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
+				: "";
+		parts.push(`7d ${pctText}${reset}`);
+	}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };
 	},
@@ -693,9 +808,13 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,
 	cache_hit: cacheHitSegment,
+	cache_hit_model: cacheHitModelSegment,
+	reprocessed: reprocessedSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
+	cache_saved: cacheSavedSegment,
+	provider_balance: providerBalanceSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

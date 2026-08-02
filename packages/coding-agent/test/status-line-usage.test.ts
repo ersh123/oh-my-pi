@@ -73,10 +73,10 @@ describe("usage status-line segment", () => {
 
 		expect(result.visible).toBe(true);
 		expect(content).toContain("5h");
-		expect(content).toContain("24%");
+		expect(content).toContain("76%");
 		expect(content).toContain("30m");
 		expect(content).toContain("7d");
-		expect(content).toContain("8%");
+		expect(content).toContain("92%");
 		expect(content).toContain("5d 21h");
 	});
 
@@ -105,9 +105,9 @@ describe("usage status-line segment", () => {
 
 		expect(content).toContain("prolite");
 		expect(content).toContain("5h");
-		expect(content).toContain("24%");
+		expect(content).toContain("76%");
 		expect(content).toContain("7d");
-		expect(content).toContain("8%");
+		expect(content).toContain("92%");
 	});
 
 	it("prefers untiered windows and labels the displayed tiered window", async () => {
@@ -128,9 +128,9 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("prolite");
 		expect(content).not.toContain("stale");
 		expect(content).toContain("5h");
-		expect(content).toContain("24%");
+		expect(content).toContain("76%");
 		expect(content).toContain("7d");
-		expect(content).toContain("8%");
+		expect(content).toContain("92%");
 	});
 
 	it("scopes fetched usage reports to the active provider and account", async () => {
@@ -165,11 +165,11 @@ describe("usage status-line segment", () => {
 		const content = stripVTControlCharacters(component.getTopBorder(200).content);
 
 		expect(content).toContain("prolite");
-		expect(content).toContain("24%");
-		expect(content).toContain("8%");
-		expect(content).not.toContain("99%");
-		expect(content).not.toContain("98%");
-		expect(content).not.toContain("66%");
+		expect(content).toContain("76%");
+		expect(content).toContain("92%");
+		expect(content).not.toMatch(/\b1%/);
+		expect(content).not.toMatch(/\b2%/);
+		expect(content).not.toMatch(/\b34%/);
 		expect(content).not.toContain("other");
 	});
 
@@ -226,16 +226,16 @@ describe("usage status-line segment", () => {
 
 		component.refreshUsageInBackground();
 		await flushUsageRefresh();
-		expect(stripVTControlCharacters(component.getTopBorder(200).content)).toContain("80%");
+		expect(stripVTControlCharacters(component.getTopBorder(200).content)).toContain("20%");
 
 		provider = "anthropic";
 		model.provider = provider;
 
 		const immediate = stripVTControlCharacters(component.getTopBorder(200).content);
-		expect(immediate).not.toContain("80%");
+		expect(immediate).not.toContain("20%");
 		await flushUsageRefresh();
 		const refreshed = stripVTControlCharacters(component.getTopBorder(200).content);
-		expect(refreshed).toContain("24%");
+		expect(refreshed).toContain("76%");
 	});
 
 	it("keeps active-provider rate-limit header reports with account metadata", async () => {
@@ -263,10 +263,9 @@ describe("usage status-line segment", () => {
 		const content = stripVTControlCharacters(component.getTopBorder(200).content);
 
 		expect(content).toContain("5h");
-		expect(content).toContain("24%");
-		expect(content).toContain("7d");
-		expect(content).toContain("8%");
-		expect(content).not.toContain("66%");
+		expect(content).toContain("76%");
+		expect(content).toContain("92%");
+		expect(content).not.toContain("34%");
 	});
 
 	it("renders tiered limits with the tier label", () => {
@@ -284,7 +283,7 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("5h");
 		expect(content).toContain("50%");
 		expect(content).toContain("7d");
-		expect(content).toContain("10%");
+		expect(content).toContain("90%");
 	});
 
 	it("sanitizes tier labels before rendering", () => {
@@ -323,15 +322,15 @@ describe("usage status-line segment", () => {
 
 		expect(result.visible).toBe(true);
 		expect(content).toContain("5h");
-		expect(content).toContain("80%");
+		expect(content).toContain("20%");
 		expect(content).not.toContain("7d");
 	});
 
-	it("uses a distinct error color at the eighty-percent threshold", () => {
+	it("uses severity colors based on spent quota while showing remaining quota", () => {
 		const high = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
 		const low = renderSegment("usage", { usage: { fiveHour: { percent: 24 } } } as unknown as SegmentContext);
-		const highWithoutValue = high.content.replace("80%", "PCT");
-		const lowWithoutValue = low.content.replace("24%", "PCT");
+		const highWithoutValue = high.content.replace("20%", "PCT");
+		const lowWithoutValue = low.content.replace("76%", "PCT");
 
 		expect(high.visible).toBe(true);
 		expect(low.visible).toBe(true);

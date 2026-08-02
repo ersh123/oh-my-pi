@@ -16,6 +16,7 @@ import { createPromptActionAutocompleteProvider } from "../../modes/prompt-actio
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
+import { NIKOFLOW_DEPTHS, type NikoflowDepth } from "../../nikoflow/state";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
@@ -119,6 +120,59 @@ function parsePythonCommandInput(text: string): { code: string; isExcluded: bool
 		code,
 		isExcluded: prefixLength === 2,
 	};
+}
+
+export interface ParsedNikoflowKeywordInput {
+	rest: string;
+}
+
+export interface InvalidNikoflowKeywordInput {
+	error: string;
+}
+
+export type NikoflowKeywordInput = ParsedNikoflowKeywordInput | InvalidNikoflowKeywordInput;
+
+export interface NikoflowKeywordTarget {
+	handleNikoflowCommand(rest?: string, options?: { source?: "keyword" | "command" }): Promise<void>;
+	showWarning(message: string): void;
+}
+
+export function parseNikoflowKeywordInput(text: string): NikoflowKeywordInput | undefined {
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+	const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+	if (!match) return undefined;
+	const token = match[1] ?? "";
+	const keyword = /^(nikoflow|никофлоу)(?::([^:\s]*))?$/i.exec(token);
+	if (!keyword) return undefined;
+	const rawDepth = keyword[2]?.toLowerCase();
+	const depth = rawDepth && NIKOFLOW_DEPTHS.includes(rawDepth as NikoflowDepth) ? rawDepth : undefined;
+	if (rawDepth !== undefined && !depth) {
+		const depthOptions = NIKOFLOW_DEPTHS.join(", ");
+		return { error: `Invalid Nikoflow depth: ${rawDepth || "(empty)"}. Use ${depthOptions}.` };
+	}
+	const task = (match[2] ?? "").trim();
+	return { rest: [depth, task].filter(Boolean).join(" ") };
+}
+
+export async function tryHandleNikoflowKeywordInput(
+	text: string,
+	target: NikoflowKeywordTarget,
+	options: { hasImages: boolean; nikoflowActive?: boolean },
+): Promise<boolean> {
+	const parsed = parseNikoflowKeywordInput(text);
+	if (!parsed) return false;
+	if (options.nikoflowActive && ("error" in parsed || parsed.rest)) return false;
+	if ("error" in parsed) {
+		target.showWarning(parsed.error);
+		return true;
+	}
+	if (options.hasImages) {
+		target.showWarning("Nikoflow keyword activation does not support image attachments. Remove them and retry.");
+		return true;
+	}
+	await target.handleNikoflowCommand(parsed.rest, { source: "keyword" });
+	return true;
 }
 
 /** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
@@ -681,6 +735,18 @@ export class InputController {
 					images: inputImages,
 					imageLinks: inputImageLinks,
 				});
+				return;
+			}
+
+			if (
+				text &&
+				(await tryHandleNikoflowKeywordInput(text, this.ctx, {
+					hasImages: hasInputImages,
+					nikoflowActive: Boolean(this.ctx.session.getNikoflowState?.()),
+				}))
+			) {
+				this.ctx.editor.addToHistory(text);
+				this.ctx.editor.clearDraft();
 				return;
 			}
 

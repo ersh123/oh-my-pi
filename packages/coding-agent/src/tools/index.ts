@@ -19,6 +19,14 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { NikoflowResearchRecordInput, NikoflowResearchRecordResult } from "../nikoflow/research";
+import type { NikoflowState } from "../nikoflow/state";
+import type {
+	NikoflowTddEvidenceResult,
+	NikoflowTddEvidenceStage,
+	NikoflowTicketDefinitionResult,
+	NikoflowTicketInput,
+} from "../nikoflow/tickets";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
@@ -57,6 +65,10 @@ import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
 import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
+import { NikoflowDefineTicketsTool } from "./nikoflow-define-tickets";
+import { NikoflowGrillingConvergedTool } from "./nikoflow-grilling-converged";
+import { NikoflowRecordResearchTool } from "./nikoflow-record-research";
+import { NikoflowRecordTddTool } from "./nikoflow-record-tdd";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
@@ -96,6 +108,9 @@ export * from "./memory-edit";
 export * from "./memory-recall";
 export * from "./memory-reflect";
 export * from "./memory-retain";
+export * from "./nikoflow-define-tickets";
+export * from "./nikoflow-grilling-converged";
+export * from "./nikoflow-record-tdd";
 export * from "./read";
 export * from "./report-tool-issue";
 export * from "./resolve";
@@ -305,6 +320,16 @@ export interface ToolSession {
 	settings: Settings;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
+	/** Nikoflow mode state (if active) */
+	getNikoflowState?: () => NikoflowState | undefined;
+	/** Capture Nikoflow ticket definitions into mode state and durable todo state. */
+	defineNikoflowTickets?: (tickets: readonly NikoflowTicketInput[]) => NikoflowTicketDefinitionResult;
+	/** Capture an evidence-backed Nikoflow Research artifact. */
+	recordNikoflowResearch?: (record: NikoflowResearchRecordInput) => NikoflowResearchRecordResult;
+	/** Ask an interactive human whether to activate Nikoflow for the current task. */
+	requestNikoflowActivation?: () => Promise<boolean>;
+	/** Record machine-checkable TDD evidence for the active Nikoflow execute gate. */
+	recordNikoflowTddEvidence?: (stage: NikoflowTddEvidenceStage) => NikoflowTddEvidenceResult;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
 	/** Goal mode state (if active or paused) */
@@ -424,6 +449,10 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
+	nikoflow_define_tickets: s => new NikoflowDefineTicketsTool(s),
+	nikoflow_grilling_converged: () => new NikoflowGrillingConvergedTool(),
+	nikoflow_record_tdd: s => new NikoflowRecordTddTool(s),
+	nikoflow_record_research: s => new NikoflowRecordResearchTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
 	memory_edit: MemoryEditTool.createIf,

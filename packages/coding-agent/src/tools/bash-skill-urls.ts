@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Skill } from "../extensibility/skills";
+import { isReservedNativeModeSkillName, type Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { validateRelativePath } from "../internal-urls/skill-protocol";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
@@ -52,12 +52,13 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 		// Leave as-is if decoding fails
 	}
 
+	const resolvableSkills = skills.filter(skill => !isReservedNativeModeSkillName(skill.name));
 	// Resolve skill name by longest-prefix match against registered skills.
 	// This handles namespaced skills ("plugin:skill") where the URI may also
 	// carry a colon-delimited suffix (e.g., ":1-5" line range).
-	const { skill, suffix } = matchSkillName(rawSkillSegment, skills);
+	const { skill, suffix } = matchSkillName(rawSkillSegment, resolvableSkills);
 	if (!skill) {
-		const available = skills.map(s => s.name);
+		const available = resolvableSkills.map(s => s.name);
 		const availableStr = available.length > 0 ? available.join(", ") : "none";
 		throw new ToolError(`Unknown skill: ${rawSkillSegment}. Available: ${availableStr}`);
 	}

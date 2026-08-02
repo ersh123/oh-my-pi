@@ -15,6 +15,7 @@ import type {
 	Model,
 	TextContent,
 	ToolChoice,
+	UsageLimitMarkResult,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -128,6 +129,7 @@ export interface TurnRecoveryHost {
 	 * usage report still shows a pre-block snapshot.
 	 */
 	maybeAutoRedeemCodexReset(activeBlockUnblockAtMs?: number): Promise<boolean>;
+	acceptRetryFallbackCandidate?(role: string, selector: RetryFallbackSelector, candidate: Model): boolean;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -177,6 +179,7 @@ export class TurnRecovery {
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
+	#lastUsageLimitOutcome: UsageLimitMarkResult | undefined;
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
@@ -208,10 +211,18 @@ export class TurnRecovery {
 			: undefined;
 	}
 
+	/** Consume the credential-rotation outcome from the latest exhausted usage-limit retry. */
+	consumeUsageLimitOutcome(): UsageLimitMarkResult | undefined {
+		const outcome = this.#lastUsageLimitOutcome;
+		this.#lastUsageLimitOutcome = undefined;
+		return outcome;
+	}
+
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
+		this.#lastUsageLimitOutcome = undefined;
 		this.#acceptTerminalEmptyStopForPrompt = false;
 	}
 
@@ -1138,6 +1149,7 @@ export class TurnRecovery {
 			// A candidate whose effort floor exceeds the per-spawn ceiling would be
 			// clamped UP past the cap by its model floor — skip it entirely.
 			if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
+			if (this.#host.acceptRetryFallbackCandidate?.(role, selector, candidate) === false) continue;
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 			if (!apiKey) continue;
 			await this.applyRetryFallbackCandidate(role, selector, currentSelector, options);

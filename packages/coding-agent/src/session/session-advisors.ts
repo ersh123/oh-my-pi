@@ -46,6 +46,7 @@ import {
 	type AdvisorMessageDetails,
 	type AdvisorNote,
 	AdvisorOutputQuarantinedError,
+	type AdvisorReviewVerdict,
 	AdvisorRuntime,
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
@@ -77,6 +78,7 @@ import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
+	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -228,6 +230,18 @@ export interface AdvisorMessageDeliveryOptions {
 	queueChipText?: string;
 	acceptTerminalEmptyStop?: boolean;
 }
+export interface StructuredAdvisorReviewResult {
+	notes: AdvisorNote[];
+	model?: Model;
+	error?: unknown;
+	unavailable?: string;
+}
+
+interface StructuredAdvisorReviewCapture {
+	advisor: ActiveAdvisor;
+	gateId: string;
+	notes: AdvisorNote[];
+}
 
 /** Session capabilities borrowed by the advisor controller. */
 export interface SessionAdvisorsHost {
@@ -263,6 +277,7 @@ export interface SessionAdvisorsHost {
 		signal: AbortSignal,
 	): Promise<Model | undefined>;
 	resolveCompactionModelCandidates(preferredModel: Model | null | undefined, availableModels: Model[]): Model[];
+	resolveAdvisorRoleModel?(): { model?: Model; thinkingLevel?: ConfiguredThinkingLevel };
 	resolveRetryFallbackRole(currentSelector: string, currentModel?: Model | null): string | undefined;
 	findRetryFallbackCandidates(
 		role: string,
@@ -305,6 +320,7 @@ export class SessionAdvisors {
 	#advisorInterruptImmuneTurnStart: number | undefined;
 	#pendingAdvisorCardEvents = new Set<Promise<void>>();
 	#advisorYieldQueueUnsubscribe: (() => void) | undefined;
+	#structuredReviewCapture?: StructuredAdvisorReviewCapture;
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
@@ -355,6 +371,44 @@ export class SessionAdvisors {
 	/** Starts configured advisor runtimes when they are eligible. */
 	buildRuntime(seedToCurrent = false): boolean {
 		return this.#buildAdvisorRuntime(seedToCurrent);
+	}
+	/** Runs one harness-owned advisor prompt and captures only verdicts bound to the requested gate. */
+	async requestStructuredReview(
+		reviewPrompt: string,
+		gateId: string,
+		timeoutMs = 30_000,
+	): Promise<StructuredAdvisorReviewResult> {
+		if (!this.#advisorEnabled) return { notes: [], unavailable: "advisor is disabled" };
+		if (this.#advisors.length === 0) this.#buildAdvisorRuntime(true);
+		const advisor = this.#advisors[0];
+		if (!advisor || advisor.runtime.disposed) {
+			return { notes: [], unavailable: "advisor runtime is not active" };
+		}
+		if (advisor.runtime.backlog > 0) {
+			await advisor.runtime.waitForCatchup(timeoutMs, 1);
+			if (advisor.runtime.backlog > 0) {
+				return { notes: [], model: advisor.model, unavailable: "advisor backlog did not drain" };
+			}
+		}
+
+		const notes: AdvisorNote[] = [];
+		const previousCapture = this.#structuredReviewCapture;
+		const messageSnapshot = advisor.agent.state.messages.length;
+		this.#structuredReviewCapture = { advisor, gateId, notes };
+		try {
+			advisor.emissionGuard.beginUpdate();
+			await advisor.agent.prompt(reviewPrompt);
+			const promptError = advisor.agent.state.error;
+			if (promptError) throw new Error(promptError);
+			return { notes: notes.filter(note => note.gateId === gateId), model: advisor.model };
+		} catch (error) {
+			const messages = advisor.agent.state.messages;
+			if (messageSnapshot < messages.length) messages.length = messageSnapshot;
+			advisor.agent.state.error = undefined;
+			return { notes: [], model: advisor.model, error };
+		} finally {
+			this.#structuredReviewCapture = previousCapture;
+		}
 	}
 
 	/** Stops every advisor runtime and starts recorder shutdown. */
@@ -589,18 +643,24 @@ export class SessionAdvisors {
 					continue;
 				}
 			} else {
-				const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
-				if (!sel) {
-					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
-					if (emitWarnings) {
-						logger.debug("advisor enabled but no model assigned to the 'advisor' role; advisor inactive", {
-							advisor: config.name,
-						});
+				const sessionRole = this.#host.resolveAdvisorRoleModel?.();
+				if (sessionRole?.model) {
+					model = sessionRole.model;
+					thinkingLevel = concreteThinkingLevel(sessionRole.thinkingLevel);
+				} else {
+					const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
+					if (!sel) {
+						this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
+						if (emitWarnings) {
+							logger.debug("advisor enabled but no model assigned to the 'advisor' role; advisor inactive", {
+								advisor: config.name,
+							});
+						}
+						continue;
 					}
-					continue;
+					model = sel.model;
+					thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
 				}
-				model = sel.model;
-				thinkingLevel = concreteThinkingLevel(sel.thinkingLevel);
 			}
 			// Clamp the effort against the resolved model. Historically we defaulted
 			// to `ThinkingLevel.Medium` unconditionally, which threw at first stream
@@ -688,7 +748,9 @@ export class SessionAdvisors {
 			} = descriptor;
 
 			const emissionGuard = new AdvisorEmissionGuard();
-			const adviseTool = new AdviseTool((note, severity) => this.#routeAdvice(advisorRef, note, severity));
+			const adviseTool = new AdviseTool((note, severity, gateId, verdict) =>
+				this.#routeAdvice(advisorRef, note, severity, gateId, verdict),
+			);
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
@@ -979,7 +1041,17 @@ export class SessionAdvisors {
 		return isTerminalTextAssistantAnswer(messages[tail]);
 	}
 
-	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
+	#routeAdvice(
+		advisor: ActiveAdvisor,
+		note: string,
+		severity?: AdvisorSeverity,
+		gateId?: string,
+		verdict?: AdvisorReviewVerdict,
+	): void {
+		const capture = this.#structuredReviewCapture;
+		if (capture?.advisor === advisor && gateId === capture.gateId) {
+			capture.notes.push({ note, severity, gateId, verdict, advisor: advisor.slug ? advisor.name : undefined });
+		}
 		if (!advisor.emissionGuard.accept(note)) {
 			logger.debug("advisor advice suppressed by emission guard", { severity, advisor: advisor.name });
 			return;
@@ -1001,10 +1073,10 @@ export class SessionAdvisors {
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
 		});
 		if (channel === "aside") {
-			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
+			this.#host.yieldQueue.enqueue("advisor", { note, severity, gateId, verdict, advisor: source });
 			return;
 		}
-		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
+		const notes: AdvisorNote[] = [{ note, severity, gateId, verdict, advisor: source }];
 		const content = formatAdvisorBatchContent(notes);
 		const details = { notes } satisfies AdvisorMessageDetails;
 		if (channel === "preserve") {

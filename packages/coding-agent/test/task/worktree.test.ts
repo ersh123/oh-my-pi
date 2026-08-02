@@ -430,6 +430,8 @@ describe("worktree isolation helpers", () => {
 						{ branchName: REDUNDANT_BRANCH, taskId: "task-2", baseSha: branchBase },
 					]);
 
+					expect(result).toEqual({ failed: [], merged: [TASK_BRANCH, REDUNDANT_BRANCH] });
+
 					const [status, unmerged, mergedContent, downstreamContent, log] = await Promise.all([
 						runGit(repo, ["status", "--porcelain=v1"]),
 						runGit(repo, ["ls-files", "--unmerged"]),
@@ -438,7 +440,7 @@ describe("worktree isolation helpers", () => {
 						runGit(repo, ["log", "--pretty=%s", `${initialSha}..HEAD`]),
 					]);
 
-					expect(result).toEqual({ failed: [], merged: [TASK_BRANCH, REDUNDANT_BRANCH] });
+					// Result asserted before file reads so merge failures surface directly.
 					// No cherry-pick sequencer state, no unmerged entries: the
 					// skip advanced cleanly.
 					expect(status).toBe("");

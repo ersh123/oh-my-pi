@@ -432,6 +432,7 @@ export interface InteractiveModeContext {
 	registerExtensionShortcuts(): void;
 	handlePlanModeCommand(initialPrompt?: string): Promise<void>;
 	handleVibeModeCommand(initialPrompt?: string): Promise<void>;
+	handleNikoflowCommand(rest?: string, options?: { source?: "keyword" | "command" }): Promise<void>;
 	handleGoalModeCommand(rest?: string): Promise<void>;
 	handleGuidedGoalCommand(rest?: string): Promise<void>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;

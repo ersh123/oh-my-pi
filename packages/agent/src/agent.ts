@@ -38,6 +38,13 @@ import {
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import { isProviderRefusalMessage } from "./replay-policy";
+import {
+	capturePrefixShape,
+	diffPrefixShape,
+	resolveCarryMessagesHash,
+	type PrefixDiagnostics,
+	type PrefixShape,
+} from "./prefix-shape";
 import type {
 	AgentBeforeModelCall,
 	AgentContext,
@@ -380,6 +387,18 @@ export class Agent {
 	#sessionId?: string;
 	#deadline?: number;
 	#promptCacheKey?: string;
+	#lastPrefixShape: PrefixShape | undefined;
+	#pendingPrefixShape: PrefixShape | undefined;
+	#lastPrefixDiagnostics: PrefixDiagnostics | undefined;
+	/**
+	 * Monotonic counter bumped by every messages mutation that is NOT a pure
+	 * tail-append (replaceMessages, popMessage, clearMessages, reset). The
+	 * lazy messages-hash carry in syncContextBeforeModelCall is only safe when
+	 * this counter has not changed since the last capture — a prune-then-grow
+	 * sequence keeps the length growing but rewrites the middle, which would
+	 * silently carry a stale hash and produce a false-negative miss marker.
+	 */
+	#messagesMutationSeq = 0;
 	#metadata?: Record<string, unknown>;
 	#metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	#providerSessionState?: Map<string, ProviderSessionState>;
@@ -529,6 +548,17 @@ export class Agent {
 	 */
 	get promptCacheKey(): string | undefined {
 		return this.#promptCacheKey;
+	}
+
+	/**
+	 * Diagnostics from the most recent model call: which cache-relevant prefix
+	 * components (system prompt, tool schemas, rewritten history) changed since
+	 * the previous call. Undefined before the second call of a session. Used by
+	 * the UI to explain a prompt-cache miss as a named cause, not just a token
+	 * count (ported from Reasonix CompareShape).
+	 */
+	get lastPrefixDiagnostics(): PrefixDiagnostics | undefined {
+		return this.#lastPrefixDiagnostics;
 	}
 
 	/**
@@ -913,6 +943,7 @@ export class Agent {
 		// New array assignment is intentional: caller-owned `ms` may be mutated
 		// after handoff; snapshot it so external mutations cannot leak in.
 		this.#state.messages = ms.slice();
+		this.#messagesMutationSeq++;
 	}
 
 	replaceQueues(steering: AgentMessage[], followUp: AgentMessage[]) {
@@ -930,6 +961,7 @@ export class Agent {
 		if (removed && this.#state.streamMessage === removed) {
 			this.#state.streamMessage = null;
 		}
+		this.#messagesMutationSeq++;
 		return removed;
 	}
 
@@ -1043,6 +1075,7 @@ export class Agent {
 
 	clearMessages() {
 		this.#state.messages.length = 0;
+		this.#messagesMutationSeq++;
 	}
 
 	abort(reason?: unknown) {
@@ -1078,6 +1111,7 @@ export class Agent {
 
 	reset() {
 		this.#state.messages.length = 0;
+		this.#messagesMutationSeq++;
 		this.#state.isStreaming = false;
 		this.#state.streamMessage = null;
 		this.#state.pendingToolCalls.clear();
@@ -1324,6 +1358,77 @@ export class Agent {
 				}
 				context.systemPrompt = this.#state.systemPrompt;
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+			// Capture the prefix shape HERE, in syncContextBeforeModelCall, i.e.
+			// BEFORE streamAssistantResponse runs transformContext /
+			// transformProviderContext on the wire path. The captured shape
+			// therefore describes `currentContext.messages` (the agent-level
+			// history), NOT the post-transform llmContext the provider actually
+			// sees. These two are NOT byte-identical in general:
+			//   - obfuscateProviderContext redacts secrets in place — a secret
+			//     sitting inside an EARLY message changes that message's bytes
+			//     on the wire relative to this capture;
+			//   - clampProviderContextImages trims images by the model's budget,
+			//     so a model switch mid-session changes the trim and thus the
+			//     prefix bytes;
+			//   - snapcompactInline.transform archives the MIDDLE of history into
+			//     frames (a real prefix mutation) — but it is only constructed for
+			//     the "snapcompact" strategy, which the autocompact guard pins to
+			//     "context-full", so it is absent in the shipped config;
+			//   - wrapSteeringForModel is a pure per-message function (see
+			//     messages.ts) and does not affect the prefix diff.
+			// We deliberately do NOT move the capture after the transforms: past
+			// that point the context is already Message[]/llmContext and the carry
+			// invariant below (messagesFreshSeq, keyed to agent-level mutations of
+			// currentContext.messages) would lose its anchor and silently carry
+			// stale hashes. The capture/wire byte gap is instead tolerated by
+			// DESIGN: detectCacheInvalidation returns its named `reasons` ONLY
+			// inside a gate bound to the PROVIDER's signal (prev.cacheRead >= 2048
+			// AND current.cacheRead == 0 AND current.cacheWrite > 0 AND
+			// reprocessed >= 2048). A capture/wire byte mismatch on its own never
+			// collapses the provider's cacheRead — the provider caches the
+			// obfuscated/trimmed bytes consistently turn over turn — so the gate
+			// stays closed and NO spurious banner appears. The named reasons
+			// (system/tools/messages) are therefore accurate in the DOMINANT case
+			// (a prefix change at a stable model / secret-set / strategy); for the
+			// rare events above (model switch, secret rotation, snapcompact) the
+			// BANNER is still truthful (the cache genuinely missed) but the named
+			// reason may be imprecise or fall outside the 3-category model (e.g. a
+			// model switch surfaces as "messages" or nothing, not "model-switch").
+			// That imprecision is a property of the 3-category reason model, NOT a
+			// bug — the gate guarantees banner-truthfulness regardless. Expanding
+			// the reason categories is scope expansion, not hardening. KNOWN
+			// BOUNDARY; the reasons-gate contract is pinned by tests in
+			// cache-invalidation-marker.test.ts.
+			//
+			// Lazy messages hash (carry contract): diffPrefixShape compares the
+			// messages hash DIRECTLY (there is NO count guard — any comment naming
+			// one is stale, the guard was removed when carry took over that job),
+			// so a pure tail-append is invisible only because the caller carries
+			// the previous hash verbatim — see resolveCarryMessagesHash below —
+			// which also skips re-hashing the whole context (O(1) instead of
+			// O(context bytes) per model call). Any rewrite/prune/pop breaks the
+			// carry and forces a fresh hash, so the churn is still reported.
+			const previousShape = this.#lastPrefixShape;
+			const contextMessages = context.messages;
+			// Lazy messages hash with a correctness invariant: carry the
+			// previous hash only while the live mutation sequence still equals
+			// the sequence the previous hash was freshly computed at
+			// (`messagesFreshSeq`). A pure append does not bump the sequence,
+			// so the prefix is intact and the carry both skips the
+			// O(context-bytes) rehash and keeps the diff honest. Any
+			// rewrite/prune/pop (including a mid-turn one between this sync
+			// and the previous diff) bumps the sequence, the equality breaks,
+			// and resolveCarryMessagesHash returns undefined so the hash is
+			// recomputed and the churn is reported.
+			const liveSeq = this.#messagesMutationSeq;
+			const carryMessagesHash = resolveCarryMessagesHash(previousShape, liveSeq);
+			this.#pendingPrefixShape = capturePrefixShape(
+				context.systemPrompt,
+				context.tools,
+				contextMessages,
+				liveSeq,
+				carryMessagesHash,
+			);
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
@@ -1422,6 +1527,13 @@ export class Agent {
 
 					case "message_end":
 						partial = null;
+						// Diff the captured prefix against the previous model call so a
+						// cache miss can be attributed to system/tools/history churn.
+						if (this.#pendingPrefixShape) {
+							this.#lastPrefixDiagnostics = diffPrefixShape(this.#lastPrefixShape, this.#pendingPrefixShape);
+						this.#lastPrefixShape = this.#pendingPrefixShape;
+						this.#pendingPrefixShape = undefined;
+						}
 						// Check if this is an assistant message with buffered Cursor tool results.
 						// If so, split the message to emit tool results at the correct position.
 						if (event.message.role === "assistant" && this.#cursorToolResultBuffer.length > 0) {

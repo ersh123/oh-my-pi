@@ -250,7 +250,14 @@ function executionLine(
  * reviewer — and its constraints don't drive the file-write misreads this
  * targets.
  */
-export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
+export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set([
+	"plan-mode-context",
+	"plan-mode-reference",
+	"nikoflow-context",
+	"nikoflow-adr",
+	"nikoflow-prd",
+	"nikoflow-research",
+]);
 
 /** Hidden non-primary custom messages whose content is needed to understand visible transcript entries. */
 const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {

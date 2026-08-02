@@ -61,4 +61,34 @@ describe("resolveCliArgv routes subcommands hidden behind leading global flags",
 			argv: ["gc", "--apply"],
 		});
 	});
+
+	test("nikoflow colon depth dispatches to the nikoflow command", () => {
+		expect(resolveCliArgv(["nikoflow:max", "fix", "bug"])).toEqual({
+			argv: ["nikoflow", "--depth", "max", "fix", "bug"],
+		});
+		expect(resolveCliArgv(["nikoflow:light", "build", "small-feature"])).toEqual({
+			argv: ["nikoflow", "--depth", "light", "build", "small-feature"],
+		});
+		expect(resolveCliArgv(["nflow:max", "--print", "audit"])).toEqual({
+			argv: ["nikoflow", "--depth", "max", "--print", "audit"],
+		});
+		expect(resolveCliArgv(["--model", "gpt", "nikoflow:light", "fix"])).toEqual({
+			argv: ["nikoflow", "--depth", "light", "--model", "gpt", "fix"],
+		});
+		expect(resolveCliArgv(["nikoflow:tactical", "fix"])).toEqual({
+			error: "Invalid Nikoflow depth: tactical. Use light, max, research.",
+		});
+		expect(resolveCliArgv(["nikoflow:wrong", "fix"])).toEqual({
+			error: "Invalid Nikoflow depth: wrong. Use light, max, research.",
+		});
+		expect(resolveCliArgv(["--model", "gpt", "nikoflow:wrong", "fix"])).toEqual({
+			error: "Invalid Nikoflow depth: wrong. Use light, max, research.",
+		});
+		expect(resolveCliArgv(["nikoflow:research", "build", "brief"])).toEqual({
+			argv: ["nikoflow", "--depth", "research", "build", "brief"],
+		});
+		expect(resolveCliArgv(["--model", "nikoflow:wrong"])).toEqual({
+			argv: ["launch", "--model", "nikoflow:wrong"],
+		});
+	});
 });

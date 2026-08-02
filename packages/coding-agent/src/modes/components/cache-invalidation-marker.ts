@@ -15,6 +15,8 @@ const MIN_CACHE_FOOTPRINT = 2048;
 export interface CacheInvalidation {
 	/** Prompt tokens the cold turn had to (re)process instead of reading from cache. */
 	reprocessedTokens: number;
+	/** Named prefix components that changed (from PrefixShape diagnostics). */
+	reasons?: readonly string[];
 }
 
 /**
@@ -46,7 +48,11 @@ export interface CacheInvalidation {
  * zero intermittently as routine propagation noise that self-heals the next
  * turn, so flagging it would be a false positive.
  */
-export function detectCacheInvalidation(prev: Usage | undefined, current: Usage): CacheInvalidation | undefined {
+export function detectCacheInvalidation(
+	prev: Usage | undefined,
+	current: Usage,
+	reasons?: readonly string[],
+): CacheInvalidation | undefined {
 	if (!prev) return undefined;
 	// Only flag a warm→cold transition: the previous turn must have actually read
 	// a meaningful prefix from cache. A write-only predecessor (first request, or
@@ -62,7 +68,7 @@ export function detectCacheInvalidation(prev: Usage | undefined, current: Usage)
 	if (current.cacheWrite <= 0) return undefined;
 	const reprocessedTokens = current.cacheWrite + current.input;
 	if (reprocessedTokens < MIN_CACHE_FOOTPRINT) return undefined;
-	return { reprocessedTokens };
+	return { reprocessedTokens, reasons };
 }
 
 const CACHE_INVALIDATION_RULE_WIDTH = 10;
@@ -98,7 +104,9 @@ export class CacheInvalidationMarkerComponent implements Component {
 		const icon = theme.icon.cacheMiss;
 		const head = icon ? `${icon} cache miss` : "cache miss";
 		const tokens = this.info.reprocessedTokens;
-		const label = tokens > 0 ? `${head} ${theme.sep.dot.trim()} ${formatNumber(tokens)} tokens` : head;
+		const reasons = this.info.reasons?.length ? ` (${this.info.reasons.join(", ")})` : "";
+		const label =
+			tokens > 0 ? `${head} ${theme.sep.dot.trim()} ${formatNumber(tokens)} tokens${reasons}` : `${head}${reasons}`;
 		const labelWidth = Bun.stringWidth(label, { countAnsiEscapeCodes: false });
 		const ruleWidth = Math.min(CACHE_INVALIDATION_RULE_WIDTH, width - labelWidth - 1);
 		if (ruleWidth < 1) {

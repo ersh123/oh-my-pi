@@ -73,6 +73,33 @@ describe("detectCacheInvalidation", () => {
 		const prev = usage({ cacheRead: 40_000, cacheWrite: 1_000 });
 		expect(detectCacheInvalidation(prev, usage({ cacheRead: 0, input: 12 }))).toBeUndefined();
 	});
+
+	it("passes prefix-churn reasons through ONLY when the warm→cold gate fires", () => {
+		// The reasons (from PrefixShape diagnostics) must ride the marker, not
+		// leak out on their own. A turn that reused cache (gate fails on
+		// current.cacheRead > 0) returns undefined even when reasons are
+		// supplied — otherwise a harmless tail append that the provider still
+		// cached would surface a spurious "cache miss (system, tools)" banner.
+		const prev = usage({ cacheRead: 49_837, cacheWrite: 980, output: 79 });
+		const reasons = ["system", "tools"] as const;
+		const current = usage({ cacheRead: 0, cacheWrite: 50_900, input: 99, output: 99 });
+		expect(detectCacheInvalidation(prev, current, reasons)).toEqual({
+			reprocessedTokens: 50_999,
+			reasons: ["system", "tools"],
+		});
+	});
+
+	it("suppresses reasons when the turn reused any cache (gate closed)", () => {
+		const prev = usage({ cacheRead: 50_900, cacheWrite: 980 });
+		const reused = usage({ cacheRead: 50_900, cacheWrite: 3_459, input: 2 });
+		expect(detectCacheInvalidation(prev, reused, ["messages"])).toBeUndefined();
+	});
+
+	it("suppresses reasons for implicit-cache propagation noise (gate closed)", () => {
+		const prev = usage({ cacheRead: 40_789, input: 1_069, output: 353 });
+		const noisy = usage({ cacheRead: 0, cacheWrite: 0, input: 43_102, output: 58 });
+		expect(detectCacheInvalidation(prev, noisy, ["system", "messages"])).toBeUndefined();
+	});
 });
 
 describe("CacheInvalidationMarkerComponent", () => {

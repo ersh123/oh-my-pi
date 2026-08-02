@@ -8,6 +8,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -17,6 +19,20 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 const baseAgent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
+
+function subprocessOptions(id: string) {
+	return {
+		cwd: "/tmp",
+		agent: baseAgent,
+		task: "do the work",
+		index: 0,
+		id,
+		settings: Settings.isolated(),
+		modelRegistry: { refresh: async () => {} } as unknown as ModelRegistry,
+		enableLsp: false,
+		keepAlive: false,
+	};
+}
 
 function assistantStopMessage(text: string): AssistantMessage {
 	return {
@@ -183,13 +199,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		});
 		mockCreateAgentSession(harness.session);
 
-		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent: baseAgent,
-			task: "do the work",
-			index: 0,
-			id: "quiescence-fresh-yield",
-		});
+		const result = await runSubprocess(subprocessOptions("quiescence-fresh-yield"));
 
 		// Run did not terminate on the parked yield: the barrier noticed, the
 		// job settled, and the ladder demanded exactly one more prompt.
@@ -213,13 +223,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		});
 		mockCreateAgentSession(harness.session);
 
-		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent: baseAgent,
-			task: "do the work",
-			index: 0,
-			id: "quiescence-stale-refusal",
-		});
+		const result = await runSubprocess(subprocessOptions("quiescence-stale-refusal"));
 
 		// task + notice + full reminder ladder (3).
 		expect(harness.prompts).toHaveLength(5);
@@ -239,13 +243,7 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		});
 		mockCreateAgentSession(harness.session);
 
-		const result = await runSubprocess({
-			cwd: "/tmp",
-			agent: baseAgent,
-			task: "do the work",
-			index: 0,
-			id: "quiescence-no-async",
-		});
+		const result = await runSubprocess(subprocessOptions("quiescence-no-async"));
 
 		expect(harness.prompts).toHaveLength(1);
 		expect(result.exitCode).toBe(0);

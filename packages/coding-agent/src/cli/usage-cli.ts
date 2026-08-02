@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { fetchProviderBalance, isBalanceSupported, type ProviderBalance } from "../session/provider-balance";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 
@@ -1078,7 +1079,76 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 		}
 
 		process.stdout.write(`${formatUsageBreakdown(filteredReports, accounts, Date.now(), redaction, disabled)}\n`);
+
+		// API-key provider balances (DeepSeek, etc.) — subscription providers
+		// are already covered by the usage reports above. This only fetches
+		// providers whose balance endpoint we know.
+		if (!cmd.history) {
+			const balances = await collectApiKeyBalances(modelRegistry, cmd.provider);
+			if (balances.length > 0) {
+				process.stdout.write(formatApiKeyBalances(balances));
+			}
+		}
 	} finally {
 		authStorage.close();
 	}
+}
+
+interface ApiKeyBalanceEntry {
+	provider: string;
+	balance: ProviderBalance | null;
+	error: string | null;
+}
+
+async function collectApiKeyBalances(
+	modelRegistry: ModelRegistry,
+	providerFilter?: string,
+): Promise<ApiKeyBalanceEntry[]> {
+	const models = modelRegistry.getAvailable();
+	const seen = new Set<string>();
+	const entries: Promise<ApiKeyBalanceEntry>[] = [];
+
+	for (const model of models) {
+		const key = `${model.provider}:${model.baseUrl}`;
+		if (seen.has(key)) continue;
+		if (providerFilter && model.provider.toLowerCase() !== providerFilter.toLowerCase()) continue;
+		if (!model.baseUrl || !isBalanceSupported(model.provider, model.baseUrl)) continue;
+		// Skip OAuth/subscription providers — they're in the usage reports above.
+		if (modelRegistry.isUsingOAuth(model)) continue;
+		seen.add(key);
+
+		entries.push(
+			(async () => {
+				try {
+					const apiKey = await modelRegistry.getApiKey(model);
+					if (!apiKey) return { provider: model.provider, balance: null, error: "no API key" };
+					const balance = await fetchProviderBalance(model.provider, model.baseUrl, apiKey);
+					return { provider: model.provider, balance, error: null };
+				} catch (err) {
+					return { provider: model.provider, balance: null, error: String(err) };
+				}
+			})(),
+		);
+	}
+
+	return Promise.all(entries);
+}
+
+function formatApiKeyBalances(entries: ApiKeyBalanceEntry[]): string {
+	const lines: string[] = [chalk.cyan("\n═ API-key balances ════════════════════════════════════════════════════")];
+	for (const entry of entries) {
+		if (entry.balance) {
+			const cur = entry.balance.currency === "USD" ? "$" : ` ${entry.balance.currency}`;
+			const amt =
+				entry.balance.currency === "USD"
+					? `${cur}${entry.balance.amount.toFixed(2)}`
+					: `${entry.balance.amount.toFixed(2)}${cur}`;
+			lines.push(`  ${chalk.bold(entry.provider.padEnd(16))} ${chalk.green(amt)}`);
+		} else {
+			const reason = entry.error ?? "no balance endpoint";
+			lines.push(`  ${chalk.bold(entry.provider.padEnd(16))} ${chalk.gray(reason)}`);
+		}
+	}
+	lines.push(chalk.cyan("══════════════════════════════════════════════════════════════════════════\n"));
+	return lines.join("\n");
 }

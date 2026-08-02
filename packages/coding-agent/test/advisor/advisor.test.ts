@@ -382,9 +382,14 @@ describe("advisor", () => {
 		it("forwards advice to the callback and returns details", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
-			const result = await tool.execute("tc-1", { note: "x", severity: "concern" });
-			expect(onAdvice).toHaveBeenCalledWith("x", "concern");
-			expect(result.details).toEqual({ note: "x", severity: "concern" });
+			const result = await tool.execute("tc-1", {
+				note: "x",
+				severity: "concern",
+				gateId: "gate-1",
+				verdict: "blocker",
+			});
+			expect(onAdvice).toHaveBeenCalledWith("x", "concern", "gate-1", "blocker");
+			expect(result.details).toEqual({ note: "x", severity: "concern", gateId: "gate-1", verdict: "blocker" });
 			expect(result.useless).toBe(true);
 		});
 
@@ -397,7 +402,7 @@ describe("advisor", () => {
 			await tool.execute("tc-2", { note, severity: "nit" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith(note, "nit");
+			expect(onAdvice).toHaveBeenCalledWith(note, "nit", undefined, undefined);
 		});
 
 		it("allows the same advice after delivered-note memory resets", async () => {
@@ -410,8 +415,8 @@ describe("advisor", () => {
 			await tool.execute("tc-2", { note, severity: "nit" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(2);
-			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit");
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "nit");
+			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit", undefined, undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "nit", undefined, undefined);
 		});
 
 		it("forwards escalations of an already-delivered note and suppresses downgrades", async () => {
@@ -427,9 +432,9 @@ describe("advisor", () => {
 			await tool.execute("tc-5", { note, severity: "nit" });
 
 			expect(onAdvice).toHaveBeenCalledTimes(3);
-			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit");
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
-			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
+			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "nit", undefined, undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern", undefined, undefined);
+			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker", undefined, undefined);
 		});
 
 		it("withholds non-blockers for in-progress updates without consuming dedupe state", async () => {
@@ -454,7 +459,7 @@ describe("advisor", () => {
 		it("validates parameters using ArkType", () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
-			const valid = tool.parameters({ note: "x", severity: "concern" });
+			const valid = tool.parameters({ note: "x", severity: "concern", gateId: "gate-1", verdict: "approve" });
 			expect(valid instanceof type.errors).toBe(false);
 
 			const invalid = tool.parameters({ note: 123, severity: "invalid" as any });

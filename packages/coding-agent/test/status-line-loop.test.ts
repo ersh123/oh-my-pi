@@ -36,6 +36,7 @@ function createContext(loopMode: SegmentContext["loopMode"]): SegmentContext {
 			cost: 0,
 			tokensPerSecond: null,
 		},
+		perModelUsage: null,
 		contextPercent: 0,
 		contextTokens: 0,
 		contextWindow: 0,
@@ -46,6 +47,7 @@ function createContext(loopMode: SegmentContext["loopMode"]): SegmentContext {
 		worktree: null,
 		git: { branch: null, status: null, pr: null },
 		usage: null,
+		balance: null,
 	};
 }
 

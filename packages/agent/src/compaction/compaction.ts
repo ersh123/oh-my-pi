@@ -30,6 +30,7 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import type { ProviderCacheProfile } from "./cache-profile";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
 import { countTokens } from "../tokenizer";
@@ -380,6 +381,126 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	}
 	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
 	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
+}
+
+// ============================================================================
+// Graduated compaction phases (ported from Reasonix cache-first compaction)
+// ============================================================================
+
+/**
+ * Fraction of the compaction threshold where a one-time soft notice fires.
+ * The prefix is NOT rewritten here — the notice tells the user the context
+ * is growing while the cache-stable prefix stays intact. Reasonix uses
+ * softCompactRatio/compactRatio = 0.5/0.8 = 0.625.
+ */
+export const GRADUATED_SOFT_RATIO = 0.625;
+
+/**
+ * Fraction of the threshold where the surgical snip pass runs: stale tool
+ * results in the cold tail are elided WITHOUT touching the warm prefix,
+ * deferring (often eliminating) the full cache-resetting compaction.
+ * Reasonix uses toolResultSnipRatio/compactRatio = 0.6/0.8 = 0.75.
+ */
+export const GRADUATED_SNIP_RATIO = 0.75;
+
+/**
+ * Fraction of the threshold where compaction is forced even when the fold
+ * would reclaim little: past this point the window is genuinely exhausted
+ * and a low-value compaction beats an overflow. Reasonix uses
+ * compactForceRatio/compactRatio = 0.9/0.8 = 1.125.
+ */
+export const GRADUATED_FORCE_RATIO = 1.125;
+
+export type CompactionPhase = "none" | "soft" | "snip" | "compact" | "force";
+
+export interface GraduatedThresholds {
+	/** One-time notice; prefix preserved. */
+	soft: number;
+	/** Surgical stale-tool-result snip; prefix preserved. */
+	snip: number;
+	/** Full compaction trigger (identical to {@link resolveThresholdTokens}). */
+	high: number;
+	/** Force compaction regardless of fold value. */
+	force: number;
+}
+
+/**
+ * Maximum writeCostRatio the adaptive push accounts for. The most expensive
+ * prompt-cache write in the verified spec set is Anthropic 1-hour retention at
+ * 2× the input price; nothing real exceeds it, so clamping here is a no-op on
+ * real data and only bounds a misconfigured catalog entry.
+ */
+const WRITE_COST_RATIO_CAP = 2;
+
+/**
+ * Per-unit threshold shift for the graduated phases. Each 1.0 of writeCostRatio
+ * delays the soft/snip/force boundaries by this fraction of the compaction
+ * threshold, so a costly prefix rewrite is deferred longer than a free one.
+ *
+ * The exact break-even (defer one turn of read-discount vs pay one rewrite
+ * premium now) depends on the unknown number of turns until the next compaction
+ * and has no closed form, so this slope is a linear tuning: free writes (0×) →
+ * 0% shift (neutral — rewriting is free, compact at the default ratios),
+ * OpenAI ≥5.6 (1.25×) → +12.5% deferral, Anthropic 1h (2×) → +20% deferral,
+ * which keeps the prefix alive noticeably longer inside its 1-hour TTL window.
+ */
+const WRITE_COST_THRESHOLD_SLOPE = 0.1;
+
+/**
+ * Resolve the four graduated thresholds as fractions of the main compaction
+ * threshold. All scale with the model's context window through
+ * {@link resolveThresholdTokens}, so a 16k model and a 1M model get
+ * proportionally spaced phases — the adaptive behavior missing from the
+ * previous binary trigger.
+ */
+export function resolveGraduatedThresholds(
+	contextWindow: number,
+	settings: CompactionSettings,
+	cacheProfile?: ProviderCacheProfile | null,
+): GraduatedThresholds {
+	const high = resolveThresholdTokens(contextWindow, settings);
+	// Push the soft/snip/force boundaries later in proportion to how expensive
+	// a prefix rewrite is: free writes keep the default ratios, costly writes
+	// defer compaction so the cached prefix lives longer. The slope and cap are
+	// the derived constants above (WRITE_COST_THRESHOLD_SLOPE / WRITE_COST_RATIO_CAP).
+	const writeRatio = cacheProfile?.writeCostRatio ?? 0;
+	const pushFactor = 1 + Math.min(writeRatio, WRITE_COST_RATIO_CAP) * WRITE_COST_THRESHOLD_SLOPE;
+	const softRatio = GRADUATED_SOFT_RATIO * pushFactor;
+	const snipRatio = GRADUATED_SNIP_RATIO * pushFactor;
+	const forceRatio = GRADUATED_FORCE_RATIO * pushFactor;
+	return {
+		soft: Math.max(0, Math.floor(high * softRatio)),
+		snip: Math.max(0, Math.floor(high * snipRatio)),
+		high,
+		force: Math.min(Math.max(0, contextWindow - 1), Math.ceil(high * forceRatio)),
+	};
+}
+
+/**
+ * Classify the current context usage into a graduated compaction phase.
+ *
+ * - `none`: under the soft notice — do nothing.
+ * - `soft`: emit a one-time "context growing, prefix preserved" notice.
+ * - `snip`: elide stale tool results in the cold tail; no prefix rewrite.
+ * - `compact`: run the configured compaction strategy.
+ * - `force`: run compaction even when the fold reclaims little.
+ *
+ * Disabled/off strategies always classify as `none`, matching
+ * {@link shouldCompact}.
+ */
+export function classifyCompactionPhase(
+	contextTokens: number,
+	contextWindow: number,
+	settings: CompactionSettings,
+	cacheProfile?: ProviderCacheProfile | null,
+): CompactionPhase {
+	if (!settings.enabled || settings.strategy === "off" || contextWindow <= 0) return "none";
+	const thresholds = resolveGraduatedThresholds(contextWindow, settings, cacheProfile);
+	if (contextTokens >= thresholds.force) return "force";
+	if (contextTokens > thresholds.high) return "compact";
+	if (contextTokens >= thresholds.snip) return "snip";
+	if (contextTokens >= thresholds.soft) return "soft";
+	return "none";
 }
 
 // ============================================================================

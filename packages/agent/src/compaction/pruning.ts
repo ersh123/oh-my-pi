@@ -87,9 +87,14 @@ export interface SupersedePruneConfig {
 	suffixTokenLimit?: number;
 	/**
 	 * Prune all candidates when the last message is at least this old: the
-	 * provider prompt cache is then cold, so re-writing it is free. MUST exceed
-	 * the cache retention (Anthropic "long" = 1h) or a still-warm prefix is busted
-	 * by the flush. Default 30 min — callers on long retention override it.
+	 * provider prompt cache is then cold, so re-writing it is free. This MUST
+	 * exceed the provider's cache TTL or a still-warm prefix is busted by the
+	 * flush. The 30-minute {@link DEFAULT_IDLE_FLUSH_MS} below is only safe for
+	 * short retention (5-minute ephemeral / ~10-minute automatic); long
+	 * retention (Anthropic "long" = 1h) needs a larger value, else the flush
+	 * rewrites a warm prefix. Callers that know the model should pass
+	 * `resolveIdleFlushMs(model)`, which derives TTL + margin from the cache
+	 * profile so the flush never fires inside the retention window.
 	 */
 	idleFlushMs?: number;
 	/** Clock override for tests. */

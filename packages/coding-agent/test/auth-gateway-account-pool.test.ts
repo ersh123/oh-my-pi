@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 import { runAuthGatewayCommand } from "@oh-my-pi/pi-coding-agent/cli/auth-gateway-cli";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -67,10 +68,16 @@ describe("auth-gateway account pool", () => {
 			output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
 			return true;
 		});
+		const probe = vi.spyOn(claudeUsageProvider, "fetchUsage").mockResolvedValue({
+			provider: "anthropic",
+			fetchedAt: Date.now(),
+			limits: [],
+		});
 
 		await runAuthGatewayCommand({ action: "check", flags: { json: true } });
 
 		const result = JSON.parse(output) as { credentials: Array<{ email?: string }> };
 		expect(result.credentials.map(credential => credential.email)).toEqual(["allowed@example.com"]);
+		expect(probe).toHaveBeenCalledTimes(1);
 	});
 });

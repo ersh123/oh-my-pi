@@ -63,6 +63,15 @@ import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
+import { assessContextThinness } from "./nikoflow/context-thinness";
+import {
+	type NikoflowGrillingModePicker,
+	type NikoflowRolePicker,
+	promptNikoflowGrillingMode,
+	promptNikoflowModelRoles,
+	shouldPromptNikoflowModelRoles,
+} from "./nikoflow/role-picker";
+import { inferDepthFromPrompt, type NikoflowDepth, type NikoflowGrillingMode } from "./nikoflow/state";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
@@ -105,6 +114,45 @@ type RunRpcMode = (
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
+async function activateNikoflowFromInitialPrompt(
+	session: AgentSession,
+	message: string | undefined,
+	explicitDepth?: NikoflowDepth,
+	autonomous = false,
+	grillingMode: NikoflowGrillingMode | null = null,
+): Promise<void> {
+	const depth = explicitDepth ?? (message ? inferDepthFromPrompt(message) : null);
+	if (depth) {
+		rejectNikoflowBatchGrillingMode(autonomous, grillingMode);
+		await session.activateNikoflowMode(depth, {
+			autonomous,
+			grillingMode: autonomous ? null : grillingMode,
+			deferHumanGateMint: message !== undefined && !autonomous,
+		});
+	}
+}
+
+export function rejectNikoflowBatchGrillingMode(
+	autonomous: boolean,
+	grillingMode: NikoflowGrillingMode | null | undefined,
+): void {
+	if (autonomous && grillingMode === "interview") {
+		throw new Error("Deep interview requires an interactive human; drop --interview or --batch.");
+	}
+}
+
+export function rejectNikoflowInNonInteractiveMode(
+	message: string | undefined,
+	explicitDepth?: NikoflowDepth,
+	autonomous = false,
+	grillingMode: NikoflowGrillingMode | null = null,
+): void {
+	rejectNikoflowBatchGrillingMode(autonomous, grillingMode);
+	const depth = explicitDepth ?? (message ? inferDepthFromPrompt(message) : null);
+	if (!depth || autonomous) return;
+	throw new Error("Nikoflow requires interactive mode; print/non-interactive runs cannot satisfy human gates.");
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
@@ -422,6 +470,9 @@ async function runInteractiveMode(
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 	joinLink?: string,
+	nikoflowDepth?: NikoflowDepth,
+	nikoflowBatch = false,
+	nikoflowGrilling: NikoflowGrillingMode | null = null,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -503,6 +554,7 @@ async function runInteractiveMode(
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
+	await activateNikoflowFromInitialPrompt(session, initialMessage, nikoflowDepth, nikoflowBatch, nikoflowGrilling);
 	if (initialMessage !== undefined) {
 		session.maybeStartTitleGeneration(initialMessage);
 		try {
@@ -1126,6 +1178,8 @@ interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
 	selectSession?: typeof selectSession;
+	selectNikoflowModelRole?: NikoflowRolePicker;
+	selectNikoflowGrillingMode?: NikoflowGrillingModePicker;
 	runAcpMode?: RunAcpMode;
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
@@ -1247,11 +1301,13 @@ export async function runRootCommand(
 	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
 	const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
-	if (smolModel || slowModel || planModel) {
+	const advisorModel = parsedArgs.nikoflowQa;
+	if (smolModel || slowModel || planModel || advisorModel) {
 		settingsInstance.overrideModelRoles({
 			smol: smolModel,
 			slow: slowModel,
 			plan: planModel,
+			advisor: advisorModel,
 		});
 	}
 
@@ -1280,6 +1336,45 @@ export async function runRootCommand(
 		settingsInstance.get("theme.dark"),
 		settingsInstance.get("theme.light"),
 	);
+
+	if (
+		shouldPromptNikoflowModelRoles(parsedArgs, {
+			interactive: isInteractive,
+			stdinIsTTY: process.stdin.isTTY,
+			stdoutIsTTY: process.stdout.isTTY,
+		})
+	) {
+		pauseStartupWatchdog();
+		try {
+			const selections = await logger.time("promptNikoflowModelRoles", promptNikoflowModelRoles, {
+				args: parsedArgs,
+				settings: settingsInstance,
+				modelRegistry,
+				pick: deps.selectNikoflowModelRole,
+			});
+			const overrides: Record<string, string> = {};
+			if (selections.default) {
+				overrides.default = selections.default.selector;
+				parsedArgs.model = selections.default.selector;
+				parsedArgs.provider = undefined;
+			}
+			if (selections.plan) {
+				overrides.plan = selections.plan.selector;
+				parsedArgs.plan = selections.plan.selector;
+			}
+			if (selections.advisor) {
+				overrides.advisor = selections.advisor.selector;
+				parsedArgs.nikoflowQa = selections.advisor.selector;
+			}
+			settingsInstance.overrideModelRoles(overrides);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+			process.exit(2);
+		} finally {
+			resumeStartupWatchdog();
+		}
+	}
 
 	let scopedModels = await logger.time(
 		"resolveModelScope",
@@ -1581,6 +1676,35 @@ export async function runRootCommand(
 			fileImages: processedFiles?.images,
 			stdinContent: pipedInput,
 		});
+		const nikoflowBatch = initialArgs.nikoflowBatch === true || initialArgs.print === true;
+		const initialNikoflowDepth =
+			initialArgs.nikoflowDepth ?? (initialMessage ? inferDepthFromPrompt(initialMessage) : null);
+		rejectNikoflowBatchGrillingMode(nikoflowBatch, initialArgs.nikoflowGrilling);
+		if (
+			initialNikoflowDepth !== null &&
+			!nikoflowBatch &&
+			isInteractive &&
+			process.stdin.isTTY &&
+			process.stdout.isTTY &&
+			initialArgs.nikoflowGrilling === undefined &&
+			initialMessage !== undefined &&
+			assessContextThinness(cwd, initialMessage).thin
+		) {
+			pauseStartupWatchdog();
+			try {
+				const selected = await logger.time(
+					"promptNikoflowGrillingMode",
+					deps.selectNikoflowGrillingMode ?? promptNikoflowGrillingMode,
+				);
+				if (selected) {
+					initialArgs.nikoflowGrilling = selected;
+				} else {
+					notifs.push({ kind: "info", message: "Nikoflow grilling: default." });
+				}
+			} finally {
+				resumeStartupWatchdog();
+			}
+		}
 
 		const showStartupSplash = shouldShowStartupSplash({
 			configured: settingsInstance.get("startup.showSplash"),
@@ -1695,10 +1819,26 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				parsedArgs.join,
+				initialArgs.nikoflowDepth,
+				initialArgs.nikoflowBatch === true,
+				initialArgs.nikoflowGrilling ?? null,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 			stopStartupWatchdog();
+			rejectNikoflowInNonInteractiveMode(
+				initialMessage,
+				initialArgs.nikoflowDepth,
+				nikoflowBatch,
+				initialArgs.nikoflowGrilling ?? null,
+			);
+			await activateNikoflowFromInitialPrompt(
+				session,
+				initialMessage,
+				initialArgs.nikoflowDepth,
+				nikoflowBatch,
+				initialArgs.nikoflowGrilling ?? null,
+			);
 			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 			await runPrintMode(session, {
 				mode,

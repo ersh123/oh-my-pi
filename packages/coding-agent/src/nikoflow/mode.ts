@@ -1,0 +1,890 @@
+import { isBuiltinToolName, normalizeToolName } from "../tools/builtin-names";
+import {
+	humanGateAccepted,
+	jsonRecordFromValue,
+	NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME,
+	normalizeNikoflowGrillingConvergence,
+} from "./gates";
+import { NIKOFLOW_RECORD_RESEARCH_TOOL_NAME } from "./research";
+import { assertNikoflowRoleRails } from "./roles";
+import {
+	advancePhase,
+	currentPhase,
+	currentTicket,
+	isHumanGatePhase,
+	mintGateRequest,
+	type NikoflowPhase,
+	type NikoflowRole,
+	type NikoflowState,
+	PHASE_ROLE,
+} from "./state";
+import {
+	getNextTicket,
+	isNikoflowTddEvidenceComplete,
+	markStatus,
+	NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
+	NIKOFLOW_RECORD_TDD_TOOL_NAME,
+	validateTicketDag,
+} from "./tickets";
+
+const MAX_GATE_HOLD_FOLLOW_UPS = 3;
+
+export interface MinimalToolCallContext {
+	toolCall: { name?: string; toolName?: string; source?: string; kind?: string };
+	args: Record<string, unknown>;
+	toolSource?: string;
+}
+
+export interface BeforeToolCallResult {
+	block?: boolean;
+	reason?: string;
+}
+
+export type BeforeToolCall = (
+	context: MinimalToolCallContext,
+	signal?: AbortSignal,
+) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
+
+export type OnTurnEnd<TMessages = unknown, TContext = unknown> = (
+	messages: TMessages,
+	signal?: AbortSignal,
+	context?: TContext,
+) => Promise<void> | void;
+
+export type OnBeforeYield = () => Promise<void> | void;
+export type ToolChoiceGetter<TDirective = unknown> = () => TDirective | undefined;
+export type NikoflowStateGateAdvance = (
+	state: NikoflowState,
+) => Promise<unknown | null | undefined> | unknown | null | undefined;
+export type NikoflowAdvisorReviewSeverity = "nit" | "concern" | "blocker";
+export type NikoflowAdvisorReviewVerdict = "approve" | "blocker";
+
+export interface NikoflowAdvisorReviewNote {
+	note: string;
+	severity?: NikoflowAdvisorReviewSeverity;
+	gateId: string;
+	verdict?: NikoflowAdvisorReviewVerdict;
+}
+
+export interface NikoflowAdvisorReview {
+	gateId: string;
+	reviewed: true;
+	verdict: NikoflowAdvisorReviewVerdict;
+	notes: readonly NikoflowAdvisorReviewNote[];
+}
+
+export type NikoflowAdvisorReviewRequest = (
+	state: NikoflowState,
+) => Promise<unknown | null | undefined> | unknown | null | undefined;
+export type NikoflowAdvisorGateAdvance = (state: NikoflowState, review: NikoflowAdvisorReview) => Promise<void> | void;
+export type NikoflowAdvisorBlock = (state: NikoflowState, review: NikoflowAdvisorReview) => Promise<void> | void;
+export type NikoflowGateExternalAction = (state: NikoflowState, message: string) => Promise<void> | void;
+
+export type NikoflowResearchArtifactCheck = (state: NikoflowState) => boolean;
+
+export interface NikoflowToolPolicy {
+	hasFailingTest?: () => boolean;
+}
+
+export interface NikoflowCallbackBundleOptions<TMessages = unknown, TContext = unknown, TDirective = unknown> {
+	getState: () => NikoflowState | null | undefined;
+	isGateSatisfied: (state: NikoflowState) => boolean;
+	enqueueFollowUp: (message: string) => void | Promise<void>;
+	policy?: NikoflowToolPolicy;
+	beforeToolCall?: BeforeToolCall;
+	onTurnEnd?: OnTurnEnd<TMessages, TContext>;
+	afterTurnEnd?: OnTurnEnd<TMessages, TContext>;
+	onBeforeYield?: OnBeforeYield;
+	getToolChoice?: ToolChoiceGetter<TDirective>;
+	nikoflowToolChoice?: ToolChoiceGetter<TDirective>;
+	advanceHumanGate?: OnTurnEnd<TMessages, TContext>;
+	advanceExecuteGate?: NikoflowStateGateAdvance;
+	requestAdvisorReview?: NikoflowAdvisorReviewRequest;
+	hasResearchArtifact?: NikoflowResearchArtifactCheck;
+	advanceAdvisorGate?: NikoflowAdvisorGateAdvance;
+	onAdvisorBlock?: NikoflowAdvisorBlock;
+	onGateNeedsExternalAction?: NikoflowGateExternalAction;
+	afterBeforeYield?: OnBeforeYield;
+}
+
+export interface NikoflowCallbackBundle<TMessages = unknown, TContext = unknown, TDirective = unknown> {
+	beforeToolCall: BeforeToolCall;
+	onTurnEnd?: OnTurnEnd<TMessages, TContext>;
+	onBeforeYield: OnBeforeYield;
+	getToolChoice?: ToolChoiceGetter<TDirective>;
+}
+
+export interface NikoflowCallbackHost<TMessages = unknown, TContext = unknown, TDirective = unknown> {
+	beforeToolCall?: BeforeToolCall;
+	getOnTurnEnd?: () => OnTurnEnd<TMessages, TContext> | undefined;
+	setOnTurnEnd?: (fn: OnTurnEnd<TMessages, TContext> | undefined) => void;
+	getOnBeforeYield?: () => OnBeforeYield | undefined;
+	setOnBeforeYield?: (fn: OnBeforeYield | undefined) => void;
+	getGetToolChoice?: () => ToolChoiceGetter<TDirective> | undefined;
+	setGetToolChoice?: (fn: ToolChoiceGetter<TDirective> | undefined) => void;
+}
+
+export interface InstalledNikoflowCallbacks<TMessages = unknown, TContext = unknown, TDirective = unknown> {
+	bundle: NikoflowCallbackBundle<TMessages, TContext, TDirective>;
+	uninstall: () => void;
+}
+
+export interface NikoflowSessionModel {
+	provider: string;
+	id: string;
+}
+
+export interface NikoflowSessionResolvedRole<TModel extends NikoflowSessionModel, TThinking = unknown> {
+	model?: TModel | null;
+	thinkingLevel?: TThinking;
+	explicitThinkingLevel: boolean;
+}
+
+export interface NikoflowSessionRoleEntry<TModel extends NikoflowSessionModel, TThinking = unknown> {
+	role: NikoflowRole;
+	model: TModel;
+	thinkingLevel?: TThinking;
+	explicitThinkingLevel: boolean;
+}
+
+export interface NikoflowHumanGateAdvanceOptions<TMessage> {
+	isGenuineUserTurn: (message: TMessage) => boolean;
+	messageTimestamp: (message: TMessage) => number | undefined;
+	messageToolName?: (message: TMessage) => string | undefined;
+	messageToolResult?: (message: TMessage) => unknown | undefined;
+	nextGateRequestId: () => string;
+	now: () => number;
+}
+
+export interface NikoflowAgentSessionHost<
+	TMessages = unknown,
+	TContext = unknown,
+	TDirective = unknown,
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+> extends NikoflowCallbackHost<TMessages, TContext, TDirective> {
+	resolveRoleModelWithThinking: (role: NikoflowRole) => NikoflowSessionResolvedRole<TModel, TThinking>;
+	applyRoleModel: (entry: NikoflowSessionRoleEntry<TModel, TThinking>) => Promise<void> | void;
+}
+
+export interface NikoflowPhaseTransition {
+	prevPhase: NikoflowPhase | null;
+	nextPhase: NikoflowPhase;
+}
+
+export interface NikoflowPhaseEntryHost<
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+> {
+	resolveRoleModelWithThinking: (role: NikoflowRole) => NikoflowSessionResolvedRole<TModel, TThinking>;
+	applyRoleModel: (entry: NikoflowSessionRoleEntry<TModel, TThinking>) => Promise<void> | void;
+	setState?: (state: NikoflowState) => Promise<void> | void;
+	sendNikoflowContext?: (state: NikoflowState, transition: NikoflowPhaseTransition) => Promise<void> | void;
+	requestAdvisorReview?: NikoflowAdvisorReviewRequest;
+}
+
+export interface NikoflowPhaseEntryOptions {
+	nextGateRequestId: () => string;
+	now: () => number;
+	mintGate?: boolean;
+	sendContext?: boolean;
+	requestAdvisorReview?: boolean;
+}
+
+export interface NikoflowPhaseEntryResult {
+	state: NikoflowState;
+	advisorReview?: unknown | null;
+}
+
+export function requiresTicketDag(state: NikoflowState): boolean {
+	return state.depth !== "research";
+}
+
+export function nikoflowTicketDagErrors(state: NikoflowState): string[] {
+	if (!requiresTicketDag(state)) return [];
+	if (state.tickets.length === 0) return ["ticket DAG is missing from Nikoflow state"];
+	return validateTicketDag(state.tickets).errors;
+}
+
+function isResearchPhase(state: NikoflowState): boolean {
+	return currentPhase(state) === "research";
+}
+
+function isNikoflowReadOnlyPhase(state: NikoflowState): boolean {
+	return isHumanGatePhase(state) || isResearchPhase(state);
+}
+
+function isTicketLoopState(state: NikoflowState): boolean {
+	return requiresTicketDag(state) && state.tickets.length > 0;
+}
+
+function shouldYieldForTicketDag(state: NikoflowState): boolean {
+	const phase = currentPhase(state);
+	if (phase !== "tickets" && phase !== "execute" && phase !== "verify") return false;
+	return nikoflowTicketDagErrors(state).length > 0;
+}
+
+function isBatchHumanGateReadyForAdvisorReview(state: NikoflowState): boolean {
+	if (!state.autonomous || !isNikoflowReadOnlyPhase(state)) return false;
+	if (state.batchGateAcceptedAt === null) return false;
+	if (currentPhase(state) === "tickets" && nikoflowTicketDagErrors(state).length > 0) return false;
+	return true;
+}
+
+function isExecuteTddComplete(state: NikoflowState): boolean {
+	const ticket = currentTicket(state) ?? getNextTicket(state.tickets);
+	return ticket ? isNikoflowTddEvidenceComplete(state.tddEvidence, ticket.id, state.gateRequestId) : true;
+}
+
+function isResearchAdvisorReadyForReview(
+	state: NikoflowState,
+	hasResearchArtifact: NikoflowResearchArtifactCheck | undefined,
+): boolean {
+	return hasResearchArtifact?.(state) ?? false;
+}
+
+function isAdvisorReviewedGate(
+	state: NikoflowState,
+	hasResearchArtifact: NikoflowResearchArtifactCheck | undefined,
+): boolean {
+	const phase = currentPhase(state);
+	if (phase === "execute") {
+		const ticket = currentTicket(state);
+		return ticket?.status === "review" && isExecuteTddComplete(state);
+	}
+	if (phase === "research") return isResearchAdvisorReadyForReview(state, hasResearchArtifact);
+	return phase === "verify" || isBatchHumanGateReadyForAdvisorReview(state);
+}
+
+function activateNextTicket(state: NikoflowState): NikoflowState {
+	if (currentPhase(state) !== "execute" || !isTicketLoopState(state)) return state;
+	const active = currentTicket(state);
+	if (active && active.status !== "done") return state;
+	const nextTicket = getNextTicket(state.tickets);
+	if (!nextTicket) return state;
+	const tickets = nextTicket.status === "todo" ? markStatus(state.tickets, nextTicket.id, "red") : state.tickets;
+	return { ...state, tickets, activeTicketId: nextTicket.id };
+}
+
+export async function enterNikoflowPhase<
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+>(
+	host: NikoflowPhaseEntryHost<TModel, TThinking>,
+	prevPhase: NikoflowPhase | null,
+	nextPhase: NikoflowPhase | null,
+	state: NikoflowState,
+	options: NikoflowPhaseEntryOptions,
+): Promise<NikoflowPhaseEntryResult> {
+	if (!nextPhase) {
+		await host.setState?.(state);
+		return { state };
+	}
+
+	const role = PHASE_ROLE[nextPhase];
+	const resolved = host.resolveRoleModelWithThinking(role);
+	if (resolved.model) {
+		await host.applyRoleModel({
+			role,
+			model: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+			explicitThinkingLevel: resolved.explicitThinkingLevel,
+		});
+	}
+
+	let entered = activateNextTicket({ ...state, phaseTurnStarted: false });
+	if (
+		options.mintGate !== false &&
+		(isNikoflowReadOnlyPhase(entered) || nextPhase === "execute" || nextPhase === "verify")
+	) {
+		entered = mintGateRequest(entered, options.nextGateRequestId(), options.now());
+	}
+
+	await host.setState?.(entered);
+	const transition = { prevPhase, nextPhase };
+	if (options.sendContext !== false) {
+		await host.sendNikoflowContext?.(entered, transition);
+	}
+
+	const advisorReview =
+		nextPhase === "verify" && options.requestAdvisorReview !== false
+			? await host.requestAdvisorReview?.(entered)
+			: undefined;
+	return { state: entered, advisorReview };
+}
+
+const READ_ONLY_PHASE_ALLOWED_TOOLS = new Set(
+	[
+		"advise",
+		"ask",
+		"ast_grep",
+		"find",
+		"glob",
+		"grep",
+		"inspect_image",
+		"list",
+		"ls",
+		NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME,
+		NIKOFLOW_DEFINE_TICKETS_TOOL_NAME,
+		NIKOFLOW_RECORD_RESEARCH_TOOL_NAME,
+		"plan",
+		"question",
+		"read",
+		"report_finding",
+		"request_user_input",
+		"search",
+		"search_tool_bm25",
+		"todo",
+		"update_plan",
+		"web_search",
+		"yield",
+	].map(normalizeToolName),
+);
+
+function toolName(context: MinimalToolCallContext): string {
+	return normalizeToolName(context.toolCall.name ?? context.toolCall.toolName ?? "");
+}
+
+function toolSource(context: MinimalToolCallContext): string | undefined {
+	const source = context.toolSource ?? context.toolCall.source ?? context.toolCall.kind;
+	return typeof source === "string" ? source.toLowerCase() : undefined;
+}
+
+function isKnownBuiltinTool(context: MinimalToolCallContext): boolean {
+	const source = toolSource(context);
+	if (source) return source === "builtin" || source === "built-in" || source === "built_in";
+	return isBuiltinToolName(toolName(context));
+}
+
+export function isNikoflowReadOnlyPhaseToolAllowed(context: MinimalToolCallContext): boolean {
+	return isKnownBuiltinTool(context) && READ_ONLY_PHASE_ALLOWED_TOOLS.has(toolName(context));
+}
+
+function readOnlyPhaseToolBlockReason(phase: NikoflowPhase): string {
+	const gate = phase === "research" ? "the Verify gate advances" : "the Ticketization gate advances";
+	return `Nikoflow ${phase} is read-only; only read/search/planning tools are allowed. Writes and code-execution tools are blocked until ${gate}.`;
+}
+
+export function nikoflowToolViolation(
+	state: NikoflowState | null | undefined,
+	context: MinimalToolCallContext,
+	_policy: NikoflowToolPolicy = {},
+): string | null {
+	const phase = state ? currentPhase(state) : null;
+	if (!state || !phase) return null;
+
+	if (isNikoflowReadOnlyPhase(state) && !isNikoflowReadOnlyPhaseToolAllowed(context)) {
+		return readOnlyPhaseToolBlockReason(phase);
+	}
+	return null;
+}
+
+export function ensureNikoflowHumanGate<TMessage>(
+	state: NikoflowState,
+	options: Pick<NikoflowHumanGateAdvanceOptions<TMessage>, "nextGateRequestId" | "now">,
+): NikoflowState {
+	if (!isHumanGatePhase(state)) return state;
+	if (state.gateRequestId && state.gateMintedAt !== null) return state;
+	return mintGateRequest(state, options.nextGateRequestId(), options.now());
+}
+
+export function advanceNikoflowHumanGate<TMessage>(
+	state: NikoflowState,
+	messages: readonly TMessage[],
+	options: NikoflowHumanGateAdvanceOptions<TMessage>,
+): NikoflowState {
+	if (!isHumanGatePhase(state)) return state;
+	if (!state.gateRequestId || state.gateMintedAt === null) {
+		return state;
+	}
+	const gateMintedAt = state.gateMintedAt;
+	const phase = currentPhase(state);
+	const acceptedAfter =
+		phase === "grilling"
+			? grillingConvergenceMarkerAt(gateMintedAt, messages, options, state.autonomous ? null : state.grillingMode)
+			: gateMintedAt;
+	if (acceptedAfter === null) {
+		return state.autonomous && state.batchGateAcceptedAt !== null ? { ...state, batchGateAcceptedAt: null } : state;
+	}
+	if (phase !== "grilling" && !state.phaseTurnStarted) {
+		return state.autonomous && state.batchGateAcceptedAt !== null ? { ...state, batchGateAcceptedAt: null } : state;
+	}
+	if (state.autonomous) {
+		if (phase === "tickets" && nikoflowTicketDagErrors(state).length > 0) {
+			return state.batchGateAcceptedAt === null ? state : { ...state, batchGateAcceptedAt: null };
+		}
+		return state.batchGateAcceptedAt === acceptedAfter ? state : { ...state, batchGateAcceptedAt: acceptedAfter };
+	}
+	const hasLaterUserTurn = messages.some(message => {
+		if (!options.isGenuineUserTurn(message)) return false;
+		return humanGateAccepted(acceptedAfter, options.messageTimestamp(message));
+	});
+	if (!hasLaterUserTurn) return state;
+	if (phase === "tickets" && nikoflowTicketDagErrors(state).length > 0) return state;
+	return advancePhase(state);
+}
+
+function grillingConvergenceMarkerAt<TMessage>(
+	gateMintedAt: number,
+	messages: readonly TMessage[],
+	options: NikoflowHumanGateAdvanceOptions<TMessage>,
+	grillingMode: NikoflowState["grillingMode"],
+): number | null {
+	if (!options.messageToolName || !options.messageToolResult) return null;
+	let convergedAt: number | null = null;
+	for (const message of messages) {
+		const timestamp = options.messageTimestamp(message);
+		if (!humanGateAccepted(gateMintedAt, timestamp)) continue;
+		if (normalizeToolName(options.messageToolName(message) ?? "") !== NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME) {
+			continue;
+		}
+		const marker = normalizeNikoflowGrillingConvergence(options.messageToolResult(message));
+		if (!marker) continue;
+		const hasInterviewFloor =
+			grillingMode !== "interview" || marker.assumptions.length > 0 || marker.risks.length > 0;
+		convergedAt = marker.openQuestions.length === 0 && hasInterviewFloor ? (timestamp ?? null) : null;
+	}
+	return convergedAt;
+}
+
+export function advanceNikoflowExecuteGate(
+	state: NikoflowState,
+	_options?: Pick<NikoflowHumanGateAdvanceOptions<unknown>, "nextGateRequestId" | "now">,
+): NikoflowState {
+	if (currentPhase(state) !== "execute") return state;
+	if (!state.phaseTurnStarted) return state;
+	if (requiresTicketDag(state) && nikoflowTicketDagErrors(state).length > 0) return state;
+	if (!isTicketLoopState(state)) return advancePhase(state);
+
+	const validation = validateTicketDag(state.tickets);
+	if (!validation.ok) return state;
+
+	const active = currentTicket(state);
+	const ticket = active && active.status !== "done" ? active : getNextTicket(state.tickets);
+	if (!ticket) return advancePhase(state);
+	let gated = state;
+	if (!gated.gateRequestId) {
+		if (!_options?.nextGateRequestId) return state;
+		gated = mintGateRequest(gated, _options.nextGateRequestId(), _options.now?.() ?? null);
+	}
+	if (!isNikoflowTddEvidenceComplete(gated.tddEvidence, ticket.id, gated.gateRequestId)) return gated;
+	const tickets = markStatus(gated.tickets, ticket.id, "review");
+	return {
+		...gated,
+		tickets,
+		activeTicketId: ticket.id,
+	};
+}
+
+function advanceNikoflowTicketAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
+	if (currentPhase(state) !== "execute") return state;
+	if (state.gateRequestId !== review.gateId) return state;
+	if (!isNikoflowAdvisorReviewApproved(review)) return state;
+
+	const active = currentTicket(state);
+	if (!active) return state;
+	const doneTickets = markStatus(state.tickets, active.id, "done");
+	const nextTicket = getNextTicket(doneTickets);
+	if (!nextTicket) {
+		return advancePhase({ ...state, tickets: doneTickets, activeTicketId: null });
+	}
+	const tickets = nextTicket.status === "todo" ? markStatus(doneTickets, nextTicket.id, "red") : doneTickets;
+	return {
+		...state,
+		tickets,
+		activeTicketId: nextTicket.id,
+		gateRequestId: null,
+		gateMintedAt: null,
+		phaseTurnStarted: false,
+	};
+}
+
+export function advanceNikoflowAdvisorGate(state: NikoflowState, review: NikoflowAdvisorReview): NikoflowState {
+	if (currentPhase(state) === "execute") return advanceNikoflowTicketAdvisorGate(state, review);
+	if (currentPhase(state) === "research") {
+		if (state.gateRequestId !== review.gateId) return state;
+		if (!isNikoflowAdvisorReviewApproved(review)) return state;
+		return advancePhase(state);
+	}
+	if (currentPhase(state) !== "verify") {
+		if (!isBatchHumanGateReadyForAdvisorReview(state)) return state;
+		if (state.gateRequestId !== review.gateId) return state;
+		if (!isNikoflowAdvisorReviewApproved(review)) return state;
+		return advancePhase(state);
+	}
+	if (state.gateRequestId !== review.gateId) return state;
+	if (!isNikoflowAdvisorReviewApproved(review)) return state;
+	return advancePhase(state);
+}
+function normalizeAdvisorReviewNote(value: unknown): NikoflowAdvisorReviewNote | null {
+	const rec = jsonRecordFromValue(value);
+	if (
+		!rec ||
+		typeof rec.note !== "string" ||
+		rec.note.trim().length === 0 ||
+		typeof rec.gateId !== "string" ||
+		rec.gateId.trim().length === 0
+	) {
+		return null;
+	}
+	const note: NikoflowAdvisorReviewNote = { note: rec.note, gateId: rec.gateId };
+	if (rec.severity === "nit" || rec.severity === "concern" || rec.severity === "blocker") {
+		note.severity = rec.severity;
+	}
+	if (rec.verdict === "approve" || rec.verdict === "blocker") {
+		note.verdict = rec.verdict;
+	}
+	return note;
+}
+
+export function normalizeNikoflowAdvisorReview(value: unknown, state: NikoflowState): NikoflowAdvisorReview | null {
+	const rec = jsonRecordFromValue(value);
+	if (rec?.reviewed !== true || typeof rec.gateId !== "string") return null;
+	if (state.gateRequestId !== rec.gateId) return null;
+	if (rec.verdict !== "approve" && rec.verdict !== "blocker") return null;
+	if (!Array.isArray(rec.notes)) return null;
+	const notes = rec.notes
+		.map(normalizeAdvisorReviewNote)
+		.filter((note): note is NikoflowAdvisorReviewNote => note !== null && note.gateId === rec.gateId);
+	if (notes.length === 0) return null;
+	const verdict = notes.some(note => note.severity === "blocker" || note.verdict === "blocker")
+		? "blocker"
+		: rec.verdict;
+	return { gateId: rec.gateId, reviewed: true, verdict, notes };
+}
+
+export function nikoflowAdvisorReviewBlockers(review: NikoflowAdvisorReview): string[] {
+	const blockers = review.notes
+		.filter(note => note.severity === "blocker" || note.verdict === "blocker")
+		.map(note => note.note);
+	return blockers.length > 0 || review.verdict !== "blocker" ? blockers : review.notes.map(note => note.note);
+}
+
+function isNikoflowAdvisorReviewApproved(review: NikoflowAdvisorReview): boolean {
+	return review.verdict === "approve" && nikoflowAdvisorReviewBlockers(review).length === 0;
+}
+
+export function createNikoflowBeforeToolCall(
+	getState: () => NikoflowState | null | undefined,
+	previous?: BeforeToolCall,
+	policy: NikoflowToolPolicy = {},
+): BeforeToolCall {
+	return async (context, signal) => {
+		const previousResult = await previous?.(context, signal);
+		if (previousResult?.block) return previousResult;
+
+		const reason = nikoflowToolViolation(getState(), context, policy);
+		return reason ? { block: true, reason } : previousResult;
+	};
+}
+
+export function createNikoflowOnTurnEnd<TMessages, TContext>(
+	previous: OnTurnEnd<TMessages, TContext> | undefined,
+	afterNikoflow: OnTurnEnd<TMessages, TContext>,
+): OnTurnEnd<TMessages, TContext> {
+	return async (messages, signal, context) => {
+		await previous?.(messages, signal, context);
+		await afterNikoflow(messages, signal, context);
+	};
+}
+
+export function createNikoflowGetToolChoice<TDirective>(
+	previous: ToolChoiceGetter<TDirective> | undefined,
+	nikoflowChoice: ToolChoiceGetter<TDirective>,
+): ToolChoiceGetter<TDirective> {
+	return () => previous?.() ?? nikoflowChoice();
+}
+
+export function formatGateHoldMessage(state: NikoflowState): string {
+	const phase = currentPhase(state) ?? "complete";
+	const ticketDagErrors = nikoflowTicketDagErrors(state);
+	if (phase === "tickets" && ticketDagErrors.length > 0) {
+		return [
+			"Nikoflow tickets gate is blocked; ticket DAG is not captured.",
+			...ticketDagErrors.map(error => `- ${error}`),
+			`Call ${NIKOFLOW_DEFINE_TICKETS_TOOL_NAME} with { tickets: [{ id, acceptance, blocked_by, implementation_notes }] } before asking for human approval.`,
+		].join("\n");
+	}
+	if ((phase === "execute" || phase === "verify") && ticketDagErrors.length > 0) {
+		return [
+			"Nikoflow ticket DAG is missing or invalid after Ticketization.",
+			...ticketDagErrors.map(error => `- ${error}`),
+			`Yield to the user; return to Ticketization and call ${NIKOFLOW_DEFINE_TICKETS_TOOL_NAME} instead of continuing.`,
+		].join("\n");
+	}
+	if (phase === "research") {
+		return [
+			"Nikoflow research gate is waiting for an independent advisor review.",
+			`Call ${NIKOFLOW_RECORD_RESEARCH_TOOL_NAME} with evidence, hypotheses, contradictions, open questions, and decision before requesting advisor review.`,
+		].join("\n");
+	}
+	if (isHumanGatePhase(state)) {
+		if (state.autonomous) {
+			if (currentPhase(state) === "grilling" && state.batchGateAcceptedAt === null) {
+				return [
+					"Nikoflow batch grilling gate is blocked; write the spec-completeness artifact.",
+					`Resolve every open question as an explicit human-unverified assumption, record risks, then call ${NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME} with { open_questions: [], assumptions: [...], risks: [...] }.`,
+					"Yield for independent advisor review; do not self-approve.",
+				].join("\n");
+			}
+			return `Nikoflow batch ${phase} gate is waiting for a clean independent advisor review. Do not self-approve.`;
+		}
+		if (phase === "grilling" && state.grillingMode === "interview") {
+			return [
+				`Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`,
+				"Deep interview requires at least one named assumption or risk in the convergence marker.",
+			].join(" ");
+		}
+		return `Nikoflow ${phase} gate is waiting for a later human approval turn. Yield now; do not self-approve it.`;
+	}
+	if (phase === "execute" && !isExecuteTddComplete(state)) {
+		const ticket = currentTicket(state) ?? getNextTicket(state.tickets);
+		return [
+			`Nikoflow execute ticket ${ticket?.id ?? "(missing)"} is blocked on TDD evidence.`,
+			`Current gate: ${state.gateRequestId ?? "(not minted)"}.`,
+			`Call ${NIKOFLOW_RECORD_TDD_TOOL_NAME} with a non-zero RED and then a zero-exit GREEN using the exact same focused command.`,
+			"Only use a reasoned waiver when the ticket has no runtime surface. Do not request advisor review before this evidence is complete.",
+		].join("\n");
+	}
+	if (phase === "execute") {
+		const ticket = currentTicket(state) ?? getNextTicket(state.tickets);
+		if (!ticket) {
+			return "Nikoflow execute phase has no valid unblocked ticket. Yield now; ticket DAG needs plan/human repair.";
+		}
+		const acceptance = ticket.acceptance.map(item => `- ${item}`).join("\n") || "- (not supplied)";
+		return [
+			`Nikoflow execute ticket ${ticket.id}.`,
+			"Implement ONLY this ticket.",
+			"Acceptance:",
+			acceptance,
+			`Implementation notes: ${ticket.implementation_notes || "(not supplied)"}`,
+			"After implementation, yield for an independent advisor review; do not self-approve.",
+		].join("\n");
+	}
+	if (phase === "verify") {
+		return "Nikoflow verify gate is waiting for an independent reviewer pass. Fix reviewer findings, then yield for another review; do not self-approve.";
+	}
+	return `Nikoflow phase "${phase}" needs external action before continuing.`;
+}
+
+export function formatGateExternalActionMessage(state: NikoflowState): string {
+	if (state.autonomous && isHumanGatePhase(state)) {
+		return `Nikoflow batch gate stopped for human resume. ${formatGateHoldMessage(state)}`;
+	}
+	return `Nikoflow gate needs external action; yielding instead of queuing another follow-up. ${formatGateHoldMessage(state)}`;
+}
+
+export function createNikoflowOnBeforeYield(
+	getState: () => NikoflowState | null | undefined,
+	isGateSatisfied: (state: NikoflowState) => boolean,
+	enqueueFollowUp: (message: string) => void | Promise<void>,
+	previous?: OnBeforeYield,
+	advanceExecuteGate?: NikoflowStateGateAdvance,
+	requestAdvisorReview?: NikoflowAdvisorReviewRequest,
+	advanceAdvisorGate?: NikoflowAdvisorGateAdvance,
+	onAdvisorBlock?: NikoflowAdvisorBlock,
+	onGateNeedsExternalAction?: NikoflowGateExternalAction,
+	afterNikoflow?: OnBeforeYield,
+	hasResearchArtifact?: NikoflowResearchArtifactCheck,
+): OnBeforeYield {
+	let followUpKey: string | null = null;
+	let requestedAdvisorReviewGateId: string | null = null;
+	let consecutiveGateHoldFollowUps = 0;
+	const queueGateHold = async (state: NikoflowState): Promise<void> => {
+		const key = `${state.depth}:${state.phaseIndex}:${state.gateRequestId ?? "no-gate"}`;
+		if (key !== followUpKey) {
+			followUpKey = key;
+			consecutiveGateHoldFollowUps = 0;
+		}
+		if (consecutiveGateHoldFollowUps >= MAX_GATE_HOLD_FOLLOW_UPS) {
+			await onGateNeedsExternalAction?.(state, formatGateExternalActionMessage(state));
+			return;
+		}
+		consecutiveGateHoldFollowUps++;
+		await enqueueFollowUp(formatGateHoldMessage(state));
+	};
+	const yieldForExternalAction = async (state: NikoflowState): Promise<void> => {
+		await onGateNeedsExternalAction?.(state, formatGateExternalActionMessage(state));
+	};
+
+	return async () => {
+		await previous?.();
+		let state = getState();
+		if (state && currentPhase(state) === "execute") {
+			if (state.phaseTurnStarted) {
+				await advanceExecuteGate?.(state);
+				state = getState();
+			}
+		}
+		let advisorBlockAlreadyQueued = false;
+		let advisorReviewUnavailable = false;
+		for (let reviewPass = 0; reviewPass < 2; reviewPass++) {
+			if (!state?.gateRequestId || isGateSatisfied(state)) break;
+			if (!isAdvisorReviewedGate(state, hasResearchArtifact)) break;
+			if (state.phaseTurnStarted || state.gateRequestId !== requestedAdvisorReviewGateId) {
+				const advisorReviewResult = await requestAdvisorReview?.(state);
+				state = getState();
+				if (!state) return;
+				if (isAdvisorReviewedGate(state, hasResearchArtifact)) {
+					requestedAdvisorReviewGateId = state.gateRequestId;
+				}
+				if (!advisorReviewResult) {
+					advisorReviewUnavailable = true;
+					break;
+				}
+				if (advisorReviewResult) {
+					const reviewerState = state;
+					const review = normalizeNikoflowAdvisorReview(advisorReviewResult, reviewerState);
+					if (review) {
+						if (nikoflowAdvisorReviewBlockers(review).length > 0) {
+							await onAdvisorBlock?.(reviewerState, review);
+							advisorBlockAlreadyQueued = true;
+							break;
+						} else {
+							await advanceAdvisorGate?.(reviewerState, review);
+						}
+					}
+					state = getState();
+				}
+				continue;
+			}
+			break;
+		}
+		await afterNikoflow?.();
+		state = getState();
+		if (!state) return;
+		const phase = currentPhase(state);
+		if (shouldYieldForTicketDag(state)) {
+			await yieldForExternalAction(state);
+			return;
+		}
+		if (phase === "execute" && !state.phaseTurnStarted) {
+			await queueGateHold(state);
+			return;
+		}
+		if (phase === "execute" && !isExecuteTddComplete(state)) {
+			await queueGateHold(state);
+			return;
+		}
+		if (phase === "research" && !isResearchAdvisorReadyForReview(state, hasResearchArtifact)) {
+			await queueGateHold(state);
+			return;
+		}
+		if (!state.gateRequestId || isGateSatisfied(state)) return;
+		if (advisorReviewUnavailable && isAdvisorReviewedGate(state, hasResearchArtifact)) {
+			await yieldForExternalAction(state);
+			return;
+		}
+		if (
+			(phase === "verify" || phase === "execute" || (state.autonomous && isHumanGatePhase(state))) &&
+			advisorBlockAlreadyQueued
+		) {
+			return;
+		}
+		if (isHumanGatePhase(state)) {
+			if (state.autonomous) {
+				await queueGateHold(state);
+				return;
+			}
+			await yieldForExternalAction(state);
+			return;
+		}
+		await yieldForExternalAction(state);
+	};
+}
+
+export function createNikoflowCallbackBundle<TMessages = unknown, TContext = unknown, TDirective = unknown>(
+	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
+): NikoflowCallbackBundle<TMessages, TContext, TDirective> {
+	const afterTurnEnd =
+		options.afterTurnEnd || options.advanceHumanGate
+			? async (messages: TMessages, signal?: AbortSignal, context?: TContext) => {
+					await options.afterTurnEnd?.(messages, signal, context);
+					await options.advanceHumanGate?.(messages, signal, context);
+				}
+			: undefined;
+	const onTurnEnd = afterTurnEnd ? createNikoflowOnTurnEnd(options.onTurnEnd, afterTurnEnd) : options.onTurnEnd;
+	const getToolChoice = options.nikoflowToolChoice
+		? createNikoflowGetToolChoice(options.getToolChoice, options.nikoflowToolChoice)
+		: options.getToolChoice;
+
+	return {
+		beforeToolCall: createNikoflowBeforeToolCall(options.getState, options.beforeToolCall, options.policy),
+		onBeforeYield: createNikoflowOnBeforeYield(
+			options.getState,
+			options.isGateSatisfied,
+			options.enqueueFollowUp,
+			options.onBeforeYield,
+			options.advanceExecuteGate,
+			options.requestAdvisorReview,
+			options.advanceAdvisorGate,
+			options.onAdvisorBlock,
+			options.onGateNeedsExternalAction,
+			options.afterBeforeYield,
+			options.hasResearchArtifact,
+		),
+		...(onTurnEnd ? { onTurnEnd } : {}),
+		...(getToolChoice ? { getToolChoice } : {}),
+	};
+}
+
+export function installNikoflowCallbacks<TMessages = unknown, TContext = unknown, TDirective = unknown>(
+	host: NikoflowCallbackHost<TMessages, TContext, TDirective>,
+	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
+): InstalledNikoflowCallbacks<TMessages, TContext, TDirective> {
+	const previousBeforeToolCall = host.beforeToolCall;
+	const previousOnTurnEnd = options.onTurnEnd ?? host.getOnTurnEnd?.();
+	const previousOnBeforeYield = options.onBeforeYield ?? host.getOnBeforeYield?.();
+	const previousGetToolChoice = options.getToolChoice ?? host.getGetToolChoice?.();
+	const bundle = createNikoflowCallbackBundle({
+		...options,
+		beforeToolCall: options.beforeToolCall ?? previousBeforeToolCall,
+		onTurnEnd: previousOnTurnEnd,
+		onBeforeYield: previousOnBeforeYield,
+		getToolChoice: previousGetToolChoice,
+	});
+
+	host.beforeToolCall = bundle.beforeToolCall;
+	host.setOnTurnEnd?.(bundle.onTurnEnd);
+	host.setOnBeforeYield?.(bundle.onBeforeYield);
+	host.setGetToolChoice?.(bundle.getToolChoice);
+
+	return {
+		bundle,
+		uninstall: () => {
+			host.beforeToolCall = previousBeforeToolCall;
+			host.setOnTurnEnd?.(previousOnTurnEnd);
+			host.setOnBeforeYield?.(previousOnBeforeYield);
+			host.setGetToolChoice?.(previousGetToolChoice);
+		},
+	};
+}
+
+export async function installNikoflowAgentSessionMode<
+	TMessages = unknown,
+	TContext = unknown,
+	TDirective = unknown,
+	TModel extends NikoflowSessionModel = NikoflowSessionModel,
+	TThinking = unknown,
+>(
+	host: NikoflowAgentSessionHost<TMessages, TContext, TDirective, TModel, TThinking>,
+	options: NikoflowCallbackBundleOptions<TMessages, TContext, TDirective>,
+): Promise<InstalledNikoflowCallbacks<TMessages, TContext, TDirective>> {
+	assertNikoflowRoleRails(role => {
+		const resolved = host.resolveRoleModelWithThinking(role);
+		return resolved.model ? { provider: resolved.model.provider, model: resolved.model.id } : null;
+	});
+
+	const { advanceHumanGate, afterBeforeYield, afterTurnEnd, ...callbackOptions } = options;
+
+	return installNikoflowCallbacks(host, {
+		...callbackOptions,
+		afterTurnEnd: async (messages, signal, context) => {
+			await afterTurnEnd?.(messages, signal, context);
+			await advanceHumanGate?.(messages, signal, context);
+		},
+		afterBeforeYield: async () => {
+			await afterBeforeYield?.();
+		},
+	});
+}

@@ -3,8 +3,10 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolContext,
+	AgentTurnEndContext,
 	StreamFn,
 	ThinkingLevel,
+	ToolChoiceDirective,
 } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
@@ -32,6 +34,9 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { NikoflowToolPolicy, OnTurnEnd, ToolChoiceGetter } from "../nikoflow/mode";
+import type { NikoflowRolePicker } from "../nikoflow/role-picker";
+import type { NikoflowState } from "../nikoflow/state";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -266,6 +271,8 @@ export interface AgentSessionConfig {
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
+	/** Existing-TUI picker for interactive Nikoflow role recovery. Omit in headless/SDK mode. */
+	nikoflowRoleRecoveryPicker?: NikoflowRolePicker;
 }
 
 /** Options for AgentSession.prompt(). */
@@ -296,6 +303,23 @@ export interface FollowUpOptions {
 	expandPromptTemplates?: boolean;
 	/** Explicit billing/initiator attribution. */
 	attribution?: MessageAttribution;
+}
+export interface AgentSessionNikoflowModeOptions {
+	getState?: () => NikoflowState | null | undefined;
+	isGateSatisfied: (state: NikoflowState) => boolean;
+	enqueueFollowUp?: (message: string) => void | Promise<void>;
+	policy?: NikoflowToolPolicy;
+	afterTurnEnd?: OnTurnEnd<AgentMessage[], AgentTurnEndContext>;
+	nikoflowToolChoice?: ToolChoiceGetter<ToolChoiceDirective>;
+}
+
+export interface AgentSessionNikoflowActivationOptions {
+	persist?: boolean;
+	sendContext?: boolean;
+	deferHumanGateMint?: boolean;
+	autonomous?: boolean;
+	grillingMode?: NikoflowState["grillingMode"];
+	initialState?: NikoflowState;
 }
 
 /** Result from a handoff operation. */

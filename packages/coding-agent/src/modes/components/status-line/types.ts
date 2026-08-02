@@ -1,6 +1,7 @@
 import type { CollabSessionState } from "../../../collab/protocol";
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
+import type { ProviderBalance } from "../../../session/provider-balance";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
@@ -35,6 +36,8 @@ export interface StatusLineSettings {
 	/** Replace the model-segment icon with the thinking-level glyph and drop the
 	 *  " · <level>" suffix, so the thinking level reads as a single compact icon. */
 	compactThinkingLevel?: boolean;
+	/** Prepend a short uppercase label before each segment's icon/value. */
+	showLabels?: boolean;
 }
 
 export type EffectiveStatusLineSettings = Required<
@@ -90,6 +93,8 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
+	/** Per-model usage breakdown, keyed by "provider/modelId". Null when unavailable. */
+	perModelUsage: Map<string, { input: number; cacheRead: number; cacheWrite: number }> | null;
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;
 	contextTokens: number;
@@ -121,6 +126,8 @@ export interface SegmentContext {
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null;
+	/** Cached provider balance for the active model, or null when unsupported/stale. */
+	balance: ProviderBalance | null;
 }
 
 export interface RenderedSegment {
@@ -130,6 +137,8 @@ export interface RenderedSegment {
 
 export interface StatusLineSegment {
 	id: StatusLineSegmentId;
+	/** Short uppercase label shown before the icon when showLabels is enabled. */
+	label?: string;
 	render(ctx: SegmentContext): RenderedSegment;
 }
 

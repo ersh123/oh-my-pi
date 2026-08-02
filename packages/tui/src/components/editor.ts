@@ -386,11 +386,22 @@ export interface EditorTheme {
 	hintStyle?: (text: string) => string;
 }
 
+export interface EditorTopBorderDetail {
+	/** Styled content, sized to the full available top-border width. */
+	content: string;
+	/** Visible width of the detail content. */
+	width: number;
+}
+
 export interface EditorTopBorder {
 	/** The status content (already styled) */
 	content: string;
 	/** Visible width of the content */
 	width: number;
+	/** Optional legacy single detail row, rendered inside the editor frame. */
+	detail?: EditorTopBorderDetail;
+	/** Optional ordered detail rows. Takes precedence over {@link detail}. */
+	details?: readonly EditorTopBorderDetail[];
 }
 
 interface HistoryEntry {
@@ -916,6 +927,17 @@ export class Editor implements Component, Focusable {
 				}
 			} else {
 				result.push(topLeft + horizontal.repeat(topFillWidth) + topRight);
+			}
+			const details = topBorder?.details ?? (topBorder?.detail ? [topBorder.detail] : []);
+			for (const detail of details) {
+				if (detail.width > topFillWidth) continue;
+				const detailFill = topFillWidth - detail.width;
+				result.push(
+					this.borderColor(`${box.vertical}${padding(paddingX)}`) +
+						detail.content +
+						" ".repeat(detailFill) +
+						this.borderColor(`${padding(paddingX)}${box.vertical}`),
+				);
 			}
 		}
 

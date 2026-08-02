@@ -20,6 +20,10 @@ export const BUILTIN_TOOL_NAMES = [
 	"task",
 	"hub",
 	"todo",
+	"nikoflow_define_tickets",
+	"nikoflow_grilling_converged",
+	"nikoflow_record_tdd",
+	"nikoflow_record_research",
 	"web_search",
 	"write",
 	"memory_edit",
@@ -42,10 +46,16 @@ const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = n
 	["find", "glob"],
 ]);
 
+const BUILTIN_TOOL_NAME_SET: ReadonlySet<string> = new Set<string>(BUILTIN_TOOL_NAMES);
+
 /** Return the canonical tool name for current and legacy built-in tool IDs. */
 export function normalizeToolName(name: string): string {
 	const normalized = name.toLowerCase();
 	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(normalized) ?? normalized;
+}
+
+export function isBuiltinToolName(name: string): boolean {
+	return BUILTIN_TOOL_NAME_SET.has(normalizeToolName(name));
 }
 
 /** Normalize and deduplicate tool names while preserving first-seen order. */
