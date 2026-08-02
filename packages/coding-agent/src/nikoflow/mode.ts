@@ -356,8 +356,29 @@ function isKnownBuiltinTool(context: MinimalToolCallContext): boolean {
 	return isBuiltinToolName(toolName(context));
 }
 
+function virtualWriteToolName(context: MinimalToolCallContext): string | undefined {
+	if (toolName(context) !== "write" || !isKnownBuiltinTool(context)) return undefined;
+	const path = context.args.path;
+	if (typeof path !== "string" || !path.startsWith("xd://")) return undefined;
+	return normalizeToolName(path.slice("xd://".length));
+}
+
+function isNikoflowReadOnlyPhaseToolAllowedForState(state: NikoflowState, context: MinimalToolCallContext): boolean {
+	if (!isNikoflowReadOnlyPhaseToolAllowed(context)) return false;
+	const virtualToolName = virtualWriteToolName(context);
+	if (!virtualToolName) return true;
+
+	const phase = currentPhase(state);
+	return (
+		(phase === "grilling" && virtualToolName === NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME) ||
+		(phase === "research" && virtualToolName === NIKOFLOW_RECORD_RESEARCH_TOOL_NAME) ||
+		(phase === "tickets" && virtualToolName === NIKOFLOW_DEFINE_TICKETS_TOOL_NAME)
+	);
+}
+
 export function isNikoflowReadOnlyPhaseToolAllowed(context: MinimalToolCallContext): boolean {
-	return isKnownBuiltinTool(context) && READ_ONLY_PHASE_ALLOWED_TOOLS.has(toolName(context));
+	if (!isKnownBuiltinTool(context)) return false;
+	return READ_ONLY_PHASE_ALLOWED_TOOLS.has(virtualWriteToolName(context) ?? toolName(context));
 }
 
 function readOnlyPhaseToolBlockReason(phase: NikoflowPhase): string {
@@ -373,7 +394,7 @@ export function nikoflowToolViolation(
 	const phase = state ? currentPhase(state) : null;
 	if (!state || !phase) return null;
 
-	if (isNikoflowReadOnlyPhase(state) && !isNikoflowReadOnlyPhaseToolAllowed(context)) {
+	if (isNikoflowReadOnlyPhase(state) && !isNikoflowReadOnlyPhaseToolAllowedForState(state, context)) {
 		return readOnlyPhaseToolBlockReason(phase);
 	}
 	return null;

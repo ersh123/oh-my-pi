@@ -202,6 +202,20 @@ describe("nikoflow mode callback helpers", () => {
 		expect(isNikoflowReadOnlyPhaseToolAllowed(customTool("search"))).toBe(false);
 		expect(nikoflowToolViolation(state, customTool("search"))).toBe(readOnlyReason("grilling"));
 	});
+	test("permits read-only virtual Nikoflow tools routed through Write", () => {
+		const grilling = createState("research", { autonomous: true });
+		const research = advancePhase(grilling);
+
+		expect(
+			nikoflowToolViolation(grilling, tool("write", { path: `xd://${NIKOFLOW_GRILLING_CONVERGED_TOOL_NAME}` })),
+		).toBeNull();
+		expect(
+			nikoflowToolViolation(research, tool("write", { path: `xd://${NIKOFLOW_RECORD_RESEARCH_TOOL_NAME}` })),
+		).toBeNull();
+		expect(nikoflowToolViolation(research, tool("write", { path: "xd://write" }))).toBe(
+			readOnlyReason("research", "the Verify gate advances"),
+		);
+	});
 
 	test("blocks writes, code execution, and unknown tools before execute", async () => {
 		const state = createState("max");
