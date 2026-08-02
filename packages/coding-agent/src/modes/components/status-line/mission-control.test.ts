@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { advancePhase, createState, mintGateRequest, setTicketDag } from "../../../nikoflow/state";
-import { getMissionControlNikoflowState } from "./mission-control";
+import { getMissionControlNikoflowState, renderMissionControlSparkline } from "./mission-control";
 
 const tickets = [
 	{
@@ -26,15 +26,15 @@ describe("Nikoflow mission-control state", () => {
 		state = { ...state, activeTicketId: "TSK-002" };
 
 		expect(getMissionControlNikoflowState(state)).toEqual({
-		phase: "execute",
-		phaseLabel: "EXEC",
-		signal: "active",
-		activeTicketId: "TSK-002",
-		completedTickets: 1,
-		totalTickets: 2,
-		phases: ["grilling", "prd", "tickets", "execute", "verify"],
-		completedPhaseCount: 3,
-	});
+			phase: "execute",
+			phaseLabel: "EXEC",
+			signal: "active",
+			activeTicketId: "TSK-002",
+			completedTickets: 1,
+			totalTickets: 2,
+			phases: ["grilling", "prd", "tickets", "execute", "verify"],
+			completedPhaseCount: 3,
+		});
 	});
 
 	it("reports a gate wait ahead of all other state", () => {
@@ -67,5 +67,10 @@ describe("Nikoflow mission-control state", () => {
 			},
 		};
 		expect(getMissionControlNikoflowState(state).signal).toBe("green");
+	});
+
+	it("renders token-rate samples as a compact terminal graph", () => {
+		expect(renderMissionControlSparkline([])).toBe("");
+		expect(renderMissionControlSparkline([0, 1, 2, 4])).toBe("▁▃▅█");
 	});
 });

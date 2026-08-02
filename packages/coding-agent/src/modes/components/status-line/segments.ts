@@ -686,9 +686,8 @@ const providerBalanceSegment: StatusLineSegment = {
 		if (!balance) return { content: "", visible: false };
 
 		const symbol = balance.currency === "USD" ? "$" : `${balance.currency} `;
-		const text = balance.currency === "USD"
-			? `${symbol}${balance.amount.toFixed(2)}`
-			: `${balance.amount.toFixed(2)}${symbol}`;
+		const text =
+			balance.currency === "USD" ? `${symbol}${balance.amount.toFixed(2)}` : `${balance.amount.toFixed(2)}${symbol}`;
 		const content = withIcon(theme.icon.tokens, text);
 		return { content: theme.fg("statusLineSpend", content), visible: true };
 	},
@@ -757,26 +756,26 @@ const usageSegment: StatusLineSegment = {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(theme.fg("accent", tier));
 		}
-	if (u.fiveHour) {
-		const used = u.fiveHour.percent;
-		const remaining = Math.max(0, 100 - used);
-		const pctText = theme.fg(pickUsageColor(used), `${Math.round(remaining)}%`);
-		const reset =
-			u.fiveHour.resetMinutes !== undefined
-				? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
-				: "";
-		parts.push(`5h ${pctText}${reset}`);
-	}
-	if (u.sevenDay) {
-		const used = u.sevenDay.percent;
-		const remaining = Math.max(0, 100 - used);
-		const pctText = theme.fg(pickUsageColor(used), `${Math.round(remaining)}%`);
-		const reset =
-			u.sevenDay.resetHours !== undefined
-				? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
-				: "";
-		parts.push(`7d ${pctText}${reset}`);
-	}
+		if (u.fiveHour) {
+			const used = u.fiveHour.percent;
+			const remaining = Math.max(0, 100 - used);
+			const pctText = theme.fg(pickUsageColor(used), `${Math.round(remaining)}%`);
+			const reset =
+				u.fiveHour.resetMinutes !== undefined
+					? theme.fg("muted", ` (${formatUsageReset(u.fiveHour.resetMinutes, "m")})`)
+					: "";
+			parts.push(`5h ${pctText}${reset}`);
+		}
+		if (u.sevenDay) {
+			const used = u.sevenDay.percent;
+			const remaining = Math.max(0, 100 - used);
+			const pctText = theme.fg(pickUsageColor(used), `${Math.round(remaining)}%`);
+			const reset =
+				u.sevenDay.resetHours !== undefined
+					? theme.fg("muted", ` (${formatUsageReset(u.sevenDay.resetHours, "h")})`)
+					: "";
+			parts.push(`7d ${pctText}${reset}`);
+		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };
 	},

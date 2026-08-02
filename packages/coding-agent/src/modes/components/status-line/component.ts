@@ -22,7 +22,11 @@ import {
 	detectCodexResetFireworks,
 } from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
-import { getMissionControlNikoflowState, type MissionControlSignal } from "./mission-control";
+import {
+	getMissionControlNikoflowState,
+	renderMissionControlSparkline,
+	type MissionControlSignal,
+} from "./mission-control";
 import { getPreset } from "./presets";
 import { renderSegment, SEGMENTS, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
@@ -66,6 +70,14 @@ function codexReportMatchesExactIdentity(report: UsageReport, identity: OAuthAcc
 	if (orgId && normalizeCodexIdentityValue(metadata.orgId) !== orgId) return false;
 	return true;
 }
+const MISSION_CONTROL_CANVAS_SEGMENTS: ReadonlySet<StatusLineSegmentId> = new Set([
+	"model",
+	"provider_balance",
+	"context_pct",
+	"token_total",
+	"token_rate",
+	"subagents",
+]);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Context-usage memo
@@ -419,6 +431,10 @@ export class StatusLineComponent implements Component {
 	// count (matching the provider and the `/context` panel), so a stable
 	// message list + model window yields a stable result we can return verbatim.
 	#contextUsageCache: ContextUsageMemo | undefined;
+	/** One sample per meaningful rate update; no timer-driven HUD animation. */
+	#missionControlRateHistory: number[] = [];
+	#missionControlLastRate: number | undefined;
+	#missionControlRateSampleAt = 0;
 
 	constructor(private session: AgentSession) {
 		this.#settings = {
@@ -1709,6 +1725,27 @@ export class StatusLineComponent implements Component {
 		const configured = this.session.configuredThinkingLevel() ?? this.session.state.thinkingLevel;
 		return labels[String(configured ?? "")] ?? String(configured ?? "ВЫКЛ").toUpperCase();
 	}
+	#missionControlReasoningGlyph(): string {
+		if (!this.session.state.model?.thinking) return theme.icon.pause;
+		if (this.session.isAutoThinking) {
+			const resolved = this.session.autoResolvedThinkingLevel();
+			return resolved
+				? (theme.thinking[String(resolved) as keyof typeof theme.thinking] ?? theme.thinking.autoPending)
+				: theme.thinking.autoPending;
+		}
+		const configured = this.session.configuredThinkingLevel() ?? this.session.state.thinkingLevel;
+		return theme.thinking[String(configured) as keyof typeof theme.thinking] ?? theme.icon.pause;
+	}
+	#recordMissionControlRate(rate: number): string {
+		const now = Date.now();
+		if (this.#missionControlLastRate !== rate || now - this.#missionControlRateSampleAt >= 1_000) {
+			this.#missionControlLastRate = rate;
+			this.#missionControlRateSampleAt = now;
+			this.#missionControlRateHistory.push(rate);
+			if (this.#missionControlRateHistory.length > 12) this.#missionControlRateHistory.shift();
+		}
+		return renderMissionControlSparkline(this.#missionControlRateHistory);
+	}
 
 	#buildMissionControlDetail(width: number): { content: string; width: number } | undefined {
 		if (width < 76) return undefined;
@@ -1819,6 +1856,7 @@ export class StatusLineComponent implements Component {
 			metrics.usageStats.tokensPerSecond == null ? 0 : Math.round(metrics.usageStats.tokensPerSecond * 10) / 10;
 		const balance = metrics.balance ? `$${metrics.balance.amount.toFixed(2)}` : "—";
 		const hud = state ? getMissionControlNikoflowState(state) : undefined;
+		const reasoningGlyph = this.#missionControlReasoningGlyph();
 		const phaseName: Record<string, string> = {
 			grilling: "РАЗБОР",
 			adr: "РЕШЕНИЕ",
@@ -1842,21 +1880,25 @@ export class StatusLineComponent implements Component {
 			const filled = Math.round((Math.max(0, Math.min(100, value)) / 100) * 10);
 			return `${theme.fg("accent", "█".repeat(filled))}${theme.fg("dim", "░".repeat(10 - filled))}`;
 		};
+		const pace =
+			tokenRate > 0 ? `${theme.icon.throughput} ${tokenRate.toFixed(1)} ТОК/С` : `${theme.icon.pause} ОЖИДАНИЕ`;
+		const sparkline = width >= 116 ? this.#recordMissionControlRate(tokenRate) : "";
 		const header = [
 			theme.fg("statusLineSep", "╭─"),
 			theme.fg("statusLineSubagents", ` ${theme.icon.session} MISSION CONTROL `),
 			theme.fg("statusLineSep", theme.sep.pipe),
-			theme.fg("statusLineModel", ` ${theme.icon.model} МОДЕЛЬ ${modelName} `),
+			theme.fg("statusLineModel", ` ${theme.icon.model} ${modelName} `),
 			theme.fg("statusLineSep", theme.sep.pipe),
-			theme.fg("accent", ` ${theme.icon.prewalk} REASONING ${reasoning} `),
+			theme.fg("accent", ` ${reasoningGlyph} ${reasoning} `),
 			theme.fg("statusLineSep", "─╮"),
 		].join("");
 		const telemetry = [
 			theme.fg("statusLineSep", "│ "),
-			theme.fg("statusLineContext", `${theme.icon.context} CTX ${contextPercent}% `),
+			theme.fg("statusLineContext", `${theme.icon.context} ${contextPercent}% `),
 			meter(contextPercent),
 			theme.fg("statusLineSep", "  │  "),
-			theme.fg("accent", `${theme.icon.throughput} ${tokenRate.toFixed(1)} TOK/С`),
+			theme.fg("accent", pace),
+			...(sparkline ? [theme.fg("statusLineSep", "  │  "), theme.fg("statusLineContext", sparkline)] : []),
 			theme.fg("statusLineSep", "  │  "),
 			theme.fg("success", `${theme.icon.cost} БАЛАНС ${balance}`),
 			theme.fg("statusLineSep", "  │  "),
@@ -1883,21 +1925,25 @@ export class StatusLineComponent implements Component {
 					),
 					theme.fg("statusLineSep", " ─╯"),
 				].join("")
-			: [
-					theme.fg("statusLineSep", "╰─ "),
-					theme.fg(
-						"statusLineContext",
-						`${theme.icon.tokens} ТОКЕНЫ ${metrics.usageStats.totalTokens.toLocaleString("ru-RU")}`,
-					),
-					theme.fg("statusLineSep", " ── "),
-					theme.fg(
-						"accent",
-						`${theme.icon.cache} КЭШ ${Math.round(metrics.usageStats.cacheRead ?? 0).toLocaleString("ru-RU")}`,
-					),
-					theme.fg("statusLineSep", " ── "),
-					theme.fg("dim", "ГОТОВ К РАБОТЕ"),
-					theme.fg("statusLineSep", " ─╯"),
-				].join("");
+			: metrics.usageStats.totalTokens > 0 || (metrics.usageStats.cacheRead ?? 0) > 0
+				? [
+						theme.fg("statusLineSep", "╰─ "),
+						theme.fg(
+							"statusLineContext",
+							`${theme.icon.tokens} ${metrics.usageStats.totalTokens.toLocaleString("ru-RU")}`,
+						),
+						theme.fg("statusLineSep", " ── "),
+						theme.fg(
+							"accent",
+							`${theme.icon.cache} ${Math.round(metrics.usageStats.cacheRead ?? 0).toLocaleString("ru-RU")}`,
+						),
+						theme.fg("statusLineSep", " ─╯"),
+					].join("")
+				: [
+						theme.fg("statusLineSep", "╰─ "),
+						theme.fg("dim", `${theme.icon.pause} ОЖИДАНИЕ ЗАДАЧИ`),
+						theme.fg("statusLineSep", " ─╯"),
+					].join("");
 		return [frame(header), frame(telemetry), frame(footer)];
 	}
 
@@ -1935,12 +1981,17 @@ export class StatusLineComponent implements Component {
 		const fgAnsi = theme.getFgAnsi("text");
 		const sepAnsi = theme.getFgAnsi("statusLineSep");
 		const subagentBadge = this.#subagentBadgeText();
+		const missionControlCanvas = effectiveSettings.separator === "mission-control" && !this.#focusedAgentId;
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
 		const leftSegIds: StatusLineSegmentId[] = [];
 		for (const segId of effectiveSettings.leftSegments) {
-			if (subagentBadge && segId === "subagents") continue;
+			if (
+				(subagentBadge && segId === "subagents") ||
+				(missionControlCanvas && MISSION_CONTROL_CANVAS_SEGMENTS.has(segId))
+			)
+				continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				leftParts.push(this.#maybeLabel(segId, rendered.content));
@@ -1950,7 +2001,11 @@ export class StatusLineComponent implements Component {
 
 		const rightParts: string[] = [];
 		for (const segId of effectiveSettings.rightSegments) {
-			if (subagentBadge && segId === "subagents") continue;
+			if (
+				(subagentBadge && segId === "subagents") ||
+				(missionControlCanvas && MISSION_CONTROL_CANVAS_SEGMENTS.has(segId))
+			)
+				continue;
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(this.#maybeLabel(segId, rendered.content));
@@ -1961,7 +2016,7 @@ export class StatusLineComponent implements Component {
 		if (runningBackgroundJobs > 0) {
 			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 		}
-		if (subagentBadge) {
+		if (subagentBadge && !missionControlCanvas) {
 			rightParts.unshift(subagentBadge);
 		}
 		const topFillWidth = Math.max(0, width);

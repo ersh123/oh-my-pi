@@ -65,3 +65,22 @@ export function getMissionControlNikoflowState(state: NikoflowState): MissionCon
 		completedPhaseCount: Math.min(state.phaseIndex, phases.length),
 	};
 }
+
+const SPARKLINE_GLYPHS = "▁▂▃▄▅▆▇█";
+
+/** Maps recent token-rate samples to a compact, terminal-native graph. */
+export function renderMissionControlSparkline(samples: readonly number[]): string {
+	if (samples.length === 0) return "";
+	const peak = Math.max(1, ...samples);
+	return samples
+		.map(
+			sample =>
+				SPARKLINE_GLYPHS[
+					Math.min(
+						SPARKLINE_GLYPHS.length - 1,
+						Math.round((Math.max(0, sample) / peak) * (SPARKLINE_GLYPHS.length - 1)),
+					)
+				]!,
+		)
+		.join("");
+}
